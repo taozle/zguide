@@ -1,167 +1,237 @@
-﻿//
-//  Paranoid Pirate Queue
-//
-//  Author:     Pepper Garretson
-//  Email:      jpgarretson@gmail.com
-//
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.ppqueue
+namespace Examples
 {
-    class Program
-    {
-        private const int HEARTBEAT_LIVENSS = 3; //3-5 is reasonable
-        private const int HEARTBEAT_INTERVAL = 1000; //msecs
+	using PP;
 
-        private const string PPP_READY = "READY";
-        private const string PPP_HEARTBEAT = "HEARTBEAT";
+	//
+	// Paranoid Pirate queue
+	//
+	// Author: metadings
+	//
 
-        public class Worker
-        {
-            public byte[] address;
-            public DateTime expiry;
+	// Here we define the worker class; a structure and a set of functions that
+	// act as constructor, destructor, and methods on worker objects:
 
-            public Worker(byte[] address)
-            {
-                this.address = address;
-                this.expiry = DateTime.Now.AddMilliseconds(HEARTBEAT_INTERVAL * HEARTBEAT_LIVENSS);
-            }
+	namespace PP
+	{
+		public class Worker : IDisposable
+		{
+			public const int PPP_HEARTBEAT_LIVENESS = 3; // 3-5 is reasonable
+			public static readonly TimeSpan PPP_HEARTBEAT_INTERVAL = TimeSpan.FromMilliseconds(500);
+			public static readonly TimeSpan PPP_TICK = TimeSpan.FromMilliseconds(250);
 
-            public void ResetExpiry()
-            {
-                this.expiry = DateTime.Now.AddMilliseconds(HEARTBEAT_INTERVAL * HEARTBEAT_LIVENSS); ;
-            }
+			public const string PPP_READY = "READY";
+			public const string PPP_HEARTBEAT = "HEARTBEAT";
 
-            public override bool Equals(object obj)
-            {
-                if (obj.GetType() != typeof(Worker))
-                {
-                    return false;
-                }
-                else
-                {
-                    return this.address.SequenceEqual((obj as Worker).address);
-                }
-            }
+			public const int PPP_INTERVAL_INIT = 1000;
+			public const int PPP_INTERVAL_MAX = 32000;
 
-            public override int GetHashCode()
-            {
-                return this.address.GetHashCode();
-            }
-        }
+			public ZFrame Identity;
 
-        static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket frontend = context.CreateSocket(SocketType.ROUTER), backend = context.CreateSocket(SocketType.ROUTER))
-                {
-                    frontend.Bind("tcp://*:5555"); // For Clients
-                    backend.Bind("tcp://*:5556"); // For Workers
+			public DateTime Expiry;
 
-                    //  Queue of available workers
-                    var workerQueue = new List<Worker>();
+			public string IdentityString {
+				get {
+					Identity.Position = 0;
+					return Identity.ReadString();
+				}
+				set {
+					if (Identity != null)
+					{
+						Identity.Dispose();
+					}
+					Identity = new ZFrame(value);
+				}
+			}
 
-                    backend.ReceiveReady += (socket, e) =>
-                    {
-                        var zmsg = new ZMessage(e.Socket);
+			// Construct new worker
+			public Worker(ZFrame identity) 
+			{
+				Identity = identity;
 
-                        byte[] identity = zmsg.Unwrap();
+				this.Expiry = DateTime.UtcNow + TimeSpan.FromMilliseconds(
+					PPP_HEARTBEAT_INTERVAL.Milliseconds * PPP_HEARTBEAT_LIVENESS
+				);
+			}
 
-                        //Any sign of life from worker means it's ready, Only add it to the queue if it's not in there already
-                        Worker worker = null;
+			// Destroy specified worker object, including identity frame.
+			public void Dispose()
+			{
+				GC.SuppressFinalize(this);
+				Dispose(true);
+			}
 
-                        if (workerQueue.Count > 0)
-                        {
-                            var workers = workerQueue.Where(x => x.address.SequenceEqual(identity));
+			protected void Dispose(bool disposing)
+			{
+				if (disposing)
+				{
+					if (Identity != null)
+					{
+						Identity.Dispose();
+						Identity = null;
+					}
+				}
+			}
+		}
 
-                            if (workers.Any())
-                                worker = workers.Single();
-                        }
+		public static class Workers
+		{
+			public static void Ready(this IList<Worker> workers, Worker worker) 
+			{
+				workers.Add(worker);
+			}
 
-                        if (worker == null)
-                        {
-                            workerQueue.Add(new Worker(identity));
-                        }
+			public static ZFrame Next(this IList<Worker> workers) 
+			{
+				Worker worker = workers[0];
+				workers.RemoveAt(0);
 
-                        //Return reply to client if it's not a control message
-                        switch (Encoding.Unicode.GetString(zmsg.Address))
-                        {
-                            case PPP_READY:
-                                Console.WriteLine("Worker " + Encoding.Unicode.GetString(identity) + " is ready...");
-                                break;
-                            case PPP_HEARTBEAT:
-                                bool found = false;
+				ZFrame identity = worker.Identity;
+				worker.Identity = null;
+				worker.Dispose();
 
-                                //Worker Refresh
-                                if (worker != null)
-                                {
-                                    found = true;
-                                    worker.ResetExpiry();
-                                }
+				return identity;
+			}
 
-                                if (!found)
-                                {
-                                    Console.WriteLine("E: worker " + Encoding.Unicode.GetString(identity) + " not ready...");
-                                }
-                                break;
-                            default:
-                                zmsg.Send(frontend);
-                                break;
-                        };
-                    };
+			public static void Purge(this IList<Worker> workers) 
+			{
+				foreach (Worker worker in workers.ToList())
+				{
+					if (DateTime.UtcNow < worker.Expiry)
+						continue;	// Worker is alive, we're done here
 
-                    frontend.ReceiveReady += (socket, e) =>
-                    {
-                        //  Now get next client request, route to next worker
-                        //  Dequeue and drop the next worker address
-                        var zmsg = new ZMessage(e.Socket);
+					workers.Remove(worker);
+				}
+			}
+		}
+	}
 
-                        Worker w = workerQueue[0];
-                        zmsg.Wrap(w.address, new byte[0]);
-                        workerQueue.RemoveAt(0);
-                        
-                        zmsg.Send(backend);
-                    };
+	static partial class Program
+	{
+		public static void PPQueue(string[] args)
+		{
+			using (var context = new ZContext())
+			using (var backend = new ZSocket(context, ZSocketType.ROUTER))
+			using (var frontend = new ZSocket(context, ZSocketType.ROUTER))
+			{
+				backend.Bind("tcp://*:5556");
+				frontend.Bind("tcp://*:5555");
 
-                    var poller = new Poller(new List<ZmqSocket> { frontend, backend });
+				// List of available workers
+				var workers = new List<Worker>();
 
-                    DateTime heartbeat_at = DateTime.Now.AddMilliseconds(HEARTBEAT_INTERVAL);
+				// Send out heartbeats at regular intervals
+				DateTime heartbeat_at = DateTime.UtcNow + Worker.PPP_HEARTBEAT_INTERVAL;
 
-                    while (true)
-                    {
-                        //Only poll frontend only if there are workers ready
-                        if (workerQueue.Count > 0)
-                        {
-                            //List<ZmqSocket> pollItems = new List<ZmqSocket>(new ZmqSocket[] { frontend, backend });
-                            poller.Poll(TimeSpan.FromMilliseconds(HEARTBEAT_INTERVAL * 1000));
-                        }
-                        else
-                        {
-                            //List<ZmqSocket> pollItems = new List<ZmqSocket>(new ZmqSocket[] { backend });
-                            poller.Poll(TimeSpan.FromMilliseconds(HEARTBEAT_INTERVAL * 1000));
-                        }
+				// Create a Receiver ZPollItem (ZMQ_POLLIN)
+				var poll = ZPollItem.CreateReceiver();
 
-                        //Send heartbeats to idle workers if it's time
-                        if (DateTime.Now >= heartbeat_at)
-                        {
-                            foreach (var worker in workerQueue)
-                            {
-                                ZMessage zmsg = new ZMessage(PPP_HEARTBEAT);
-                                zmsg.Wrap(worker.address, new byte[0]);
-                                zmsg.Send(backend);
-                            }
+				ZError error;
+				ZMessage incoming;
+				while (true)
+				{
+					// Handle worker activity on backend
+					if (backend.PollIn(poll, out incoming, out error, Worker.PPP_TICK))
+					{
+						using (incoming)
+						{
+							// Any sign of life from worker means it's ready
+							ZFrame identity = incoming.Unwrap();
+							var worker = new Worker(identity);
+							workers.Ready(worker);
 
-                            heartbeat_at = DateTime.Now.AddMilliseconds(HEARTBEAT_INTERVAL);
-                        }
-                    }
-                }
-            }
-        }
-    }
+							// Validate control message, or return reply to client
+							if (incoming.Count == 1)
+							{
+								string message = incoming[0].ReadString();
+								if (message == Worker.PPP_READY)
+								{
+									Console.WriteLine("I:        worker ready ({0})", worker.IdentityString);
+								}
+								else if (message == Worker.PPP_HEARTBEAT)
+								{
+									Console.WriteLine("I: receiving heartbeat ({0})", worker.IdentityString);
+								}
+								else
+								{
+									Console_WriteZMessage("E: invalid message from worker", incoming);
+								}
+							}
+							else
+							{
+								if (Verbose) Console_WriteZMessage("I: [backend sending to frontend] ({0})", incoming, worker.IdentityString);
+								frontend.Send(incoming);
+							}
+						}
+					}
+					else
+					{
+						if (error == ZError.ETERM)
+							break;	// Interrupted
+						if (error != ZError.EAGAIN)
+							throw new ZException(error);
+					}
+
+					// Handle client activity on frontend
+					if (workers.Count > 0)
+					{
+						// Poll frontend only if we have available workers
+						if (frontend.PollIn(poll, out incoming, out error, Worker.PPP_TICK))
+						{
+							// Now get next client request, route to next worker
+							using (incoming)
+							{
+								ZFrame workerIdentity = workers.Next();
+								incoming.Prepend(workerIdentity);
+
+								if (Verbose) Console_WriteZMessage("I: [frontend sending to backend] ({0})", incoming, workerIdentity.ReadString());
+								backend.Send(incoming);
+							}
+						}
+						else
+						{
+							if (error == ZError.ETERM)
+								break;	// Interrupted
+							if (error != ZError.EAGAIN)
+								throw new ZException(error);
+						}
+					}
+
+					// We handle heartbeating after any socket activity. First, we send
+					// heartbeats to any idle workers if it's time. Then, we purge any
+					// dead workers:
+					if (DateTime.UtcNow > heartbeat_at)
+					{
+						heartbeat_at = DateTime.UtcNow + Worker.PPP_HEARTBEAT_INTERVAL;
+
+						foreach (Worker worker in workers)
+						{
+							using (var outgoing = new ZMessage())
+							{
+								outgoing.Add(ZFrame.CopyFrom(worker.Identity));
+								outgoing.Add(new ZFrame(Worker.PPP_HEARTBEAT));
+
+								Console.WriteLine("I:   sending heartbeat ({0})", worker.IdentityString);
+								backend.Send(outgoing);
+							}
+						}
+					}
+					workers.Purge();
+				}
+
+				// When we're done, clean up properly
+				foreach (Worker worker in workers)
+				{
+					worker.Dispose();
+				}
+			}
+		}
+	}
 }

@@ -1,71 +1,68 @@
-﻿//
-//  Simple request-reply broker
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
+
 using ZeroMQ;
-using ZeroMQ.Interop;
 
-namespace zguide.rrbroker
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket frontend = context.CreateSocket(SocketType.ROUTER), backend = context.CreateSocket(SocketType.DEALER))
-                {
-                    frontend.Bind("tcp://*:5559");
-                    backend.Bind("tcp://*:5560");
+	static partial class Program
+	{
+		public static void RRBroker(string[] args)
+		{
+			//
+			// Simple request-reply broker
+			//
+			// Author: metadings
+			//
 
-                    frontend.ReceiveReady += (sender, e) => FrontendPollInHandler(e.Socket, backend);
-                    backend.ReceiveReady += (sender, e) => BackendPollInHandler(e.Socket, frontend);
+			// Prepare our context and sockets
+			using (var ctx = new ZContext())
+			using (var frontend = new ZSocket(ctx, ZSocketType.ROUTER))
+			using (var backend = new ZSocket(ctx, ZSocketType.DEALER))
+			{
+				frontend.Bind("tcp://*:5559");
+				backend.Bind("tcp://*:5560");
 
-                    var poller = new Poller(new List<ZmqSocket> { frontend, backend });
+				// Initialize poll set
+				var poll = ZPollItem.CreateReceiver();
 
-                    while (true)
-                    {
-                        poller.Poll();
-                    }
-                }
-            }
-        }
+				// Switch messages between sockets
+				ZError error;
+				ZMessage message;
+				while (true)
+				{
+					if (frontend.PollIn(poll, out message, out error, TimeSpan.FromMilliseconds(64)))
+					{
+						// Process all parts of the message
+						Console_WriteZMessage("frontend", 2, message);
+						backend.Send(message);
+					}
+					else
+					{
+						if (error == ZError.ETERM)
+							return;	// Interrupted
+						if (error != ZError.EAGAIN)
+							throw new ZException(error);
+					}
 
-        private static void FrontendPollInHandler(ZmqSocket frontend, ZmqSocket backend)
-        {
-            RelayMessage(frontend, backend);
-        }
-
-        private static void BackendPollInHandler(ZmqSocket backend, ZmqSocket frontend)
-        {
-            RelayMessage(backend, frontend);
-        }
-
-        private static void RelayMessage(ZmqSocket source, ZmqSocket destination)
-        {
-            bool hasMore = true;
-            while (hasMore)
-            {
-                // side effect warning!
-                // note! that this uses Receive mode that gets a byte[], the router c# implementation 
-                // doesnt work if you get a string message instead of the byte[] i would prefer the solution thats commented.
-                // but the router doesnt seem to be able to handle the response back to the client
-                //string message = source.Receive(Encoding.Unicode);
-                //hasMore = source.RcvMore;
-                //destination.Send(message, Encoding.Unicode, hasMore ? SendRecvOpt.SNDMORE : SendRecvOpt.NONE);
-
-                int bytesReceived;
-                byte[] message = source.Receive(null, out bytesReceived);
-                hasMore = source.ReceiveMore;
-                destination.Send(message, bytesReceived, hasMore ? SocketFlags.SendMore : SocketFlags.None);
-            }
-        }
-    }
+					if (backend.PollIn(poll, out message, out error, TimeSpan.FromMilliseconds(64)))
+					{
+						// Process all parts of the message
+						Console_WriteZMessage(" backend", 2, message);
+						frontend.Send(message);
+					}
+					else
+					{
+						if (error == ZError.ETERM)
+							return;	// Interrupted
+						if (error != ZError.EAGAIN)
+							throw new ZException(error);
+					}
+				}
+			}
+		}
+	}
 }

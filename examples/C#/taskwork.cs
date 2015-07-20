@@ -1,47 +1,49 @@
-//
-//  Task worker
-//  Connects PULL socket to tcp://localhost:5557
-//  Collects workloads from ventilator via that socket
-//  Connects PUSH socket to tcp://localhost:5558
-//  Sends results to sink via that socket
-//
-
-//  Author:     Mike Sheridan, Tomas Roos
-//  Email:      mike@westforkconsulting.com, ptomasroos@gmail.com
-
-using System;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.taskwork
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket receiver = context.CreateSocket(SocketType.PULL), sender = context.CreateSocket(SocketType.PUSH))
-                {
-                    receiver.Connect("tcp://localhost:5557");
-                    sender.Connect("tcp://localhost:5558");
+	static partial class Program
+	{
+		public static void TaskWork(string[] args)
+		{
+			//
+			// Task worker
+			// Connects PULL socket to tcp://localhost:5557
+			// Collects workloads from ventilator via that socket
+			// Connects PUSH socket to tcp://localhost:5558
+			// Sends results to sink via that socket
+			//
+			// Author: metadings
+			//
 
-                    while (true)
-                    {
-                        string task = receiver.Receive(Encoding.Unicode);
+			// Socket to receive messages on and
+			// Socket to send messages to
+			using (var context = new ZContext())
+			using (var receiver = new ZSocket(context, ZSocketType.PULL))
+			using (var sink = new ZSocket(context, ZSocketType.PUSH))
+			{
+				receiver.Connect("tcp://127.0.0.1:5557");
+				sink.Connect("tcp://127.0.0.1:5558");
 
-                        //  Simple progress indicator for the viewer;
-                        Console.WriteLine("{0}.", task);
+				// Process tasks forever
+				while (true)
+				{
+					var replyBytes = new byte[4];
+					receiver.ReceiveBytes(replyBytes, 0, replyBytes.Length);
+					int workload = BitConverter.ToInt32(replyBytes, 0);
+					Console.WriteLine("{0}.", workload);	// Show progress
 
-                        int sleepTime = Convert.ToInt32(task);
-                        Thread.Sleep(sleepTime);
+					Thread.Sleep(workload);	// Do the work
 
-                        // Send 'result' to the sink
-                        sender.Send("", Encoding.Unicode);
-                    }
-                }
-            }
-        }
-    }
+					sink.Send(new byte[0], 0, 0);	// Send results to sink
+				}
+			}
+		}
+	}
 }

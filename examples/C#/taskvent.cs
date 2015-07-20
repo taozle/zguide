@@ -1,59 +1,60 @@
-﻿//
-//  Task ventilator
-//  Binds PUSH socket to tcp://localhost:5557
-//  Sends batch of tasks to workers via that socket
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
-using System;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
+using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.taskvent
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket sender = context.CreateSocket(SocketType.PUSH))
-                {
-                    sender.Bind("tcp://*:5557");
+	static partial class Program
+	{
+		public static void TaskVent(string[] args)
+		{
+			//
+			// Task ventilator
+			// Binds PUSH socket to tcp://localhost:5557
+			// Sends batch of tasks to workers via that socket
+			//
+			// Author: metadings
+			//
 
-                    Console.WriteLine("Press enter when the workers are ready: ");
+			// Socket to send messages on and
+			// Socket to send start of batch message on
+			using (var context = new ZContext())
+			using (var sender = new ZSocket(context, ZSocketType.PUSH))
+			using (var sink = new ZSocket(context, ZSocketType.PUSH))
+			{
+				sender.Bind("tcp://*:5557");
+				sink.Connect("tcp://127.0.0.1:5558");
 
-                    while (Console.ReadKey(true).Key != ConsoleKey.Enter)
-                    {
+				Console.WriteLine("Press ENTER when the workers are ready...");
+				Console.ReadKey(true);
+				Console.WriteLine("Sending tasks to workers...");
 
-                    }
+				// The first message is "0" and signals start of batch
+				sink.Send(new byte[] { 0x00 }, 0, 1);
 
-                    Console.WriteLine("Sending tasks to workers...");
+				// Initialize random number generator
+				var rnd = new Random();
 
-                    //  The first message is "0" and signals start of batch
-                    sender.Send("0", Encoding.Unicode);
+				// Send 100 tasks
+				int i = 0;
+				long total_msec = 0;	// Total expected cost in msecs
+				for (; i < 100; ++i)
+				{
+					// Random workload from 1 to 100msecs
+					int workload = rnd.Next(100) + 1;
+					total_msec += workload;
+					byte[] action = BitConverter.GetBytes(workload);
 
-                    var randomizer = new Random(DateTime.Now.Millisecond);
+					Console.WriteLine("{0}", workload);
+					sender.Send(action, 0, action.Length);
+				}
 
-                    const int tasksToSend = 100;
-
-                    int expectedTime = 0;
-
-                    for (int taskNumber = 0; taskNumber < tasksToSend; taskNumber++)
-                    {
-                        //  Random workload from 1 to 100msecs
-                        int sleepTimeOnWorker = randomizer.Next(1, 100);
-                        expectedTime += sleepTimeOnWorker;
-                        sender.Send(sleepTimeOnWorker.ToString(), Encoding.Unicode);
-                    }
-
-                    Console.WriteLine("Total expected time for 1 worker: {0} msec", expectedTime);
-                }
-            }
-
-            Console.ReadKey();
-        }
-    }
+				Console.WriteLine("Total expected cost: {0} ms", total_msec);
+			}
+		}
+	}
 }

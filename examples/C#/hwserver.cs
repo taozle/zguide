@@ -1,44 +1,57 @@
-﻿//
-//  Hello World server
-//  Binds REP socket to tcp://*:5555
-//  Expects "Hello" from client, replies with "World"
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
-using System;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.hwserver
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket replyer = context.CreateSocket(SocketType.REP))
-                {
-                    replyer.Bind("tcp://*:5555");
+	static partial class Program
+	{
+		public static void HWServer(string[] args)
+		{
+			//
+			// Hello World server
+			//
+			// Author: metadings
+			//
 
-                    const string replyMessage = "World";
+			if (args == null || args.Length < 1)
+			{
+				Console.WriteLine();
+				Console.WriteLine("Usage: ./{0} HWServer [Name]", AppDomain.CurrentDomain.FriendlyName);
+				Console.WriteLine();
+				Console.WriteLine("    Name   Your name. Default: World");
+				Console.WriteLine();
+				args = new string[] { "World" };
+			}
 
-                    while (true)
-                    {
-                        string message = replyer.Receive(Encoding.Unicode);
-                        Console.WriteLine("Received request: {0}", message);
+			string name = args[0];
 
-                        // Simulate work, by sleeping
-                        Thread.Sleep(1000);
+			// Create
+			using (var context = new ZContext())
+			using (var responder = new ZSocket(context, ZSocketType.REP))
+			{
+				// Bind
+				responder.Bind("tcp://*:5555");
 
-                        // Send reply back to client
-                        replyer.Send(replyMessage, Encoding.Unicode);
-                    }
-                }
-            }
-        }
-    }
+				while (true)
+				{
+					// Receive
+					using (ZFrame request = responder.ReceiveFrame())
+					{
+						Console.WriteLine("Received {0}", request.ReadString());
+
+						// Do some work
+						Thread.Sleep(1);
+
+						// Send
+						responder.Send(new ZFrame(name));
+					}
+				}
+			}
+		}
+	}
 }

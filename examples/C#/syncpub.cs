@@ -1,46 +1,59 @@
-﻿//
-//  Synchronized publisher
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
-using System;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.syncpub
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket publisher = context.CreateSocket(SocketType.PUB), syncService = context.CreateSocket(SocketType.REP))
-                {
-                    publisher.Bind("tcp://*:5561");
-                    syncService.Bind("tcp://*:5562");
+	static partial class Program
+	{
+		const int SyncPub_SubscribersExpected = 3;	// We wait for 3 subscribers
 
-                    //  Get synchronization from subscribers
-                    const int subscribersToWaitFor = 10;
-                    for (int count = 0; count < subscribersToWaitFor; count++)
-                    {
-                        syncService.Receive(Encoding.Unicode);
-                        syncService.Send("", Encoding.Unicode);
-                    }
+		public static void SyncPub(string[] args)
+		{
+			//
+			// Synchronized publisher
+			//
+			// Author: metadings
+			//
 
-                    //  Now broadcast exactly 1M updates followed by END
-                    const int updatesToSend = 1000000;
-                    for (int updateId = 0; updateId < updatesToSend; updateId++)
-                    {
-                        publisher.Send("Rhubard", Encoding.Unicode);
-                    }
+			// Socket to talk to clients and
+			// Socket to receive signals
+			using (var context = new ZContext())
+			using (var publisher = new ZSocket(context, ZSocketType.PUB))
+			using (var syncservice = new ZSocket(context, ZSocketType.REP))
+			{
+				publisher.SendHighWatermark = 1100000;
+				publisher.Bind("tcp://*:5561");
 
-                    publisher.Send("END", Encoding.Unicode);
-                }
-            }
-        }
-    }
+				syncservice.Bind("tcp://*:5562");
+
+				// Get synchronization from subscribers
+				int subscribers = SyncPub_SubscribersExpected;
+				do
+				{
+					Console.WriteLine("Waiting for {0} subscriber" + (subscribers > 1 ? "s" : string.Empty) + "...", subscribers);
+
+					// - wait for synchronization request
+					syncservice.ReceiveFrame();
+
+					// - send synchronization reply
+					syncservice.Send(new ZFrame());
+				} 
+				while (--subscribers > 0);
+
+				// Now broadcast exactly 20 updates followed by END
+				Console.WriteLine("Broadcasting messages:");
+				for (int i = 0; i < 20; ++i)
+				{
+					Console.WriteLine("Sending {0}...", i);
+					publisher.Send(new ZFrame(i));
+				}
+				publisher.Send(new ZFrame("END"));
+			}
+		}
+	}
 }

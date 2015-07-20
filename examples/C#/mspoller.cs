@@ -1,58 +1,67 @@
-﻿//
-//  Reading from multiple sockets
-//  This version uses zmq_poll(). 
-//  This version is aims to be non-blocking, no Thread.Sleep here!
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
+using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.mspoller
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                //  Connect to task ventilator and weather server
-                using (ZmqSocket receiver = context.CreateSocket(SocketType.PULL), subscriber = context.CreateSocket(SocketType.SUB))
-                {
-                    receiver.Connect("tcp://localhost:5557");
-                    subscriber.Connect("tcp://localhost:5556");
-                    subscriber.Subscribe(Encoding.Unicode.GetBytes("10001 "));
+	static partial class Program
+	{
+		public static void MSPoller(string[] args)
+		{
+			//
+			// Reading from multiple sockets
+			// This version uses zmq_poll()
+			//
+			// Author: metadings
+			//
 
-                    receiver.ReceiveReady += ReceiverPollInHandler;
-                    subscriber.ReceiveReady += SubscriberPollInHandler;
+			using (var context = new ZContext())
+			using (var receiver = new ZSocket(context, ZSocketType.PULL))
+			using (var subscriber = new ZSocket(context, ZSocketType.SUB))
+			{
+				// Connect to task ventilator
+				receiver.Connect("tcp://127.0.0.1:5557");
 
-                    var poller = new Poller(new List<ZmqSocket> {  });
-                    
-                    //  Process messages from both sockets
-                    while (true)
-                    {
-                        poller.Poll();
-                    }
-                }
-            }
-        }
+				// Connect to weather server
+				subscriber.Connect("tcp://127.0.0.1:5556");
+				subscriber.SetOption(ZSocketOption.SUBSCRIBE, "10001 ");
 
-        // Task Processing event
-        public static void ReceiverPollInHandler(object sender, SocketEventArgs e)
-        {
-            e.Socket.Receive(Encoding.Unicode);
-            Console.WriteLine("Process Task");
-        }
+				var poll = ZPollItem.CreateReceiver();
 
-        // Weather server event
-        public static void SubscriberPollInHandler(object sender, SocketEventArgs e)
-        {
-            e.Socket.Receive(Encoding.Unicode);
-            Console.WriteLine("Process Weather");
-        }
-    }
+				// Process messages from both sockets
+				ZError error;
+				ZMessage msg;
+				while (true)
+				{
+					if (receiver.PollIn(poll, out msg, out error, TimeSpan.FromMilliseconds(64)))
+					{
+						// Process task
+					}
+					else
+					{
+						if (error == ZError.ETERM)
+							return;	// Interrupted
+						if (error != ZError.EAGAIN)
+							throw new ZException(error);
+					}
+
+					if (subscriber.PollIn(poll, out msg, out error, TimeSpan.FromMilliseconds(64)))
+					{
+						// Process weather update
+					}
+					else
+					{
+						if (error == ZError.ETERM)
+							return;	// Interrupted
+						if (error != ZError.EAGAIN)
+							throw new ZException(error);
+					}
+				}
+			}
+		}
+	}
 }

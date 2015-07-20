@@ -1,166 +1,211 @@
-﻿//
-//  Paranoid Pirate Worker
-//
-//  Author:     Pepper Garretson
-//  Email:      jpgarretson@gmail.com
-//
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading;
+
 using ZeroMQ;
-using zguide;
 
-namespace zguide.ppworker 
+namespace Examples
 {
-    class Program
-    {
-        private const int HEARTBEAT_LIVENESS = 3; // 3-5 is reasonable
-        private const int HEARTBEAT_INTERVAL = 1000; // msecs
-        private const int INTERVAL_INIT = 1000;  // Initial reconnect
-        private const int INTERVAL_MAX = 32000;  // After exponential backoff
+	using PP;
 
-        private const string PPP_READY = "READY";
-        private const string PPP_HEARTBEAT = "HEARTBEAT";
+	//
+	// Paranoid Pirate worker
+	//
+	// We have a single task that implements the worker side of the
+	// Paranoid Pirate Protocol (PPP). The interesting parts here are
+	// the heartbeating, which lets the worker detect if the queue has
+	// died, and vice versa:
+	//
+	// Author: metadings
+	//
 
-        static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                int interval = INTERVAL_INIT;
-                int liveness = HEARTBEAT_LIVENESS;
+	static partial class Program
+	{
+		static ZSocket PPWorker_CreateZSocket(ZContext context, string name, out ZError error)
+		{
+			// Helper function that returns a new configured socket
+			// connected to the Paranoid Pirate queue
 
-                while (true)
-                {
-                    int cylces = 0;
+			var worker = new ZSocket(context, ZSocketType.DEALER);
+			worker.IdentityString = name;
 
-                    using (ZmqSocket worker = ConnectWorker(context))
-                    {
-                        worker.ReceiveReady += (socket, revents) =>
-                        {
-                            var zmsg = new ZMessage(revents.Socket);
+			if (!worker.Connect("tcp://127.0.0.1:5556", out error))
+			{
+				return null;	// Interrupted
+			}
 
-                            byte[] identity = zmsg.Unwrap();
+			// Tell queue we're ready for work
+			using (var outgoing = new ZFrame(Worker.PPP_READY))
+			{
+				worker.Send(outgoing);
+			}
 
-                            switch (Encoding.Unicode.GetString(zmsg.Address))
-                            {
-                                case PPP_HEARTBEAT:
-                                    interval = INTERVAL_INIT;
-                                    liveness = HEARTBEAT_LIVENESS;
-                                    break;
-                                default:
-                                    if (zmsg.FrameCount > 1)
-                                    {
-                                        if (!doTheWork(cylces++))
-                                        {
-                                            break;
-                                        }
-                                        interval = INTERVAL_INIT;
-                                        liveness = HEARTBEAT_LIVENESS;
-                                        Console.WriteLine("W: work completed");
-                                        zmsg.Send(worker);
-                                    }
-                                    else
-                                    {
-                                        Console.WriteLine("E: invalied message {0}", identity);
-                                    }
-                                    break;
-                            };
-                        };
+			Console.WriteLine("I:        worker ready");
+			return worker;
+		}
 
-                        //Send out heartbeats at regular intervals
-                        DateTime heartbeat_at = DateTime.Now.AddMilliseconds(HEARTBEAT_INTERVAL);
+		public static void PPWorker(string[] args)
+		{
+			if (args == null || args.Length == 0)
+			{
+				Console.WriteLine();
+				Console.WriteLine("Usage: ./{0} PPWorker [Name]", AppDomain.CurrentDomain.FriendlyName);
+				Console.WriteLine();
+				Console.WriteLine("    Name   Your name. Default: World");
+				Console.WriteLine();
+				args = new string[] { "World" };
+			}
+			string name = args[0];
 
-                        while (true)
-                        {
-                            var poller = new Poller(new List<ZmqSocket> { worker });
-                            
-                            poller.Poll(TimeSpan.FromMilliseconds(HEARTBEAT_INTERVAL * 1000));
+			ZError error;
+			using (var context = new ZContext())
+			{
+				ZSocket worker = null;
+				try // using (worker)
+				{
+					if (null == (worker = PPWorker_CreateZSocket(context, name, out error)))
+					{
+						if (error == ZError.ETERM)
+							return;	// Interrupted
+						throw new ZException(error);
+					}
 
-                            //If liveness hits zero, queue is considered disconnected
-                            if (--liveness <= 0)
-                            {
-                                Console.WriteLine("W: heartbeat failure, can't reach queue.");
-                                Console.WriteLine("W: reconnecting in {0} msecs...", interval);
+					// If liveness hits zero, queue is considered disconnected
+					int liveness = Worker.PPP_HEARTBEAT_LIVENESS;
+					int interval = Worker.PPP_INTERVAL_INIT;
 
-                                try
-                                {
-                                    Thread.Sleep(interval);
-                                }
-                                catch (System.Exception ex)
-                                {
-                                    Console.WriteLine(ex.Message);
-                                }
+					// Send out heartbeats at regular intervals
+					DateTime heartbeat_at = DateTime.UtcNow + Worker.PPP_HEARTBEAT_INTERVAL;
 
-                                //Exponential Backoff
-                                if (interval < INTERVAL_MAX)
-                                    interval *= 2;
+					ZMessage incoming;
+					int cycles = 0;
+					var poll = ZPollItem.CreateReceiver();
+					var rnd = new Random();
 
-                                liveness = HEARTBEAT_LIVENESS;
+					while (true)
+					{
+						if (worker.PollIn(poll, out incoming, out error, Worker.PPP_TICK))
+						{
+							// Get message
+							// - 3-part envelope + content -> request
+							// - 1-part HEARTBEAT -> heartbeat
+							using (incoming)
+							{
+								// To test the robustness of the queue implementation we
+								// simulate various typical problems, such as the worker
+								// crashing or running very slowly. We do this after a few
+								// cycles so that the architecture can get up and running
+								// first:
+								if (incoming.Count >= 3)
+								{
+									Console_WriteZMessage("I: receiving reply", incoming);
 
-                                //Break the while loop and start the connection over
-                                break;
-                            }
+									cycles++;
+									if (cycles > 3 && rnd.Next(5) == 0)
+									{
+										Console.WriteLine("I: simulating a crash");
+										return;
+									}
+									if (cycles > 3 && rnd.Next(3) == 0)
+									{
+										Console.WriteLine("I: simulating CPU overload");
+										Thread.Sleep(100);
+									}
 
-                            //Send heartbeat to queue if it's time
-                            if (DateTime.Now > heartbeat_at)
-                            {
-                                heartbeat_at = DateTime.Now.AddMilliseconds(HEARTBEAT_INTERVAL);
-                                ZMessage zmsg = new ZMessage(PPP_HEARTBEAT);
-                                zmsg.Send(worker);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+									Thread.Sleep(1);	// Do some heavy work
 
+									Console.WriteLine("I: sending reply");
+									worker.Send(incoming);
 
-        /*
-         * Do the job, simuate problems if cycle > 5
-         */
-        static bool doTheWork(int cycle)
-        {
-            Random rand = new Random();
+									liveness = Worker.PPP_HEARTBEAT_LIVENESS;
+								}
+								// When we get a heartbeat message from the queue, it means the
+								// queue was (recently) alive, so we must reset our liveness
+								// indicator:
+								else if (incoming.Count == 1)
+								{
+									string identity = incoming[0].ReadString();
 
-            try
-            {
-                if (cycle > 3 && rand.Next(6) == 0)
-                {
-                    Console.WriteLine("I: simulating a crash");
-                    return false;
-                }
-                else if (cycle > 3 && rand.Next(6) == 0)
-                {
-                    Console.WriteLine("I: simulating a CPU overload");
-                    Thread.Sleep(3000);
-                }
+									if (identity == Worker.PPP_HEARTBEAT)
+									{
+										Console.WriteLine("I: receiving heartbeat");
+										liveness = Worker.PPP_HEARTBEAT_LIVENESS;
+									}
+									else
+									{
+										Console_WriteZMessage("E: invalid message", incoming);
+									}
+								}
+								else
+								{
+									Console_WriteZMessage("E: invalid message", incoming);
+								}
+							}
+							interval = Worker.PPP_INTERVAL_INIT;
+						}
+						else
+						{
+							if (error == ZError.ETERM)
+								break;	// Interrupted
+							if (error != ZError.EAGAIN)
+								throw new ZException(error);
+						}
 
-                //Do some work
-                Thread.Sleep(300);
-            }
-            catch(System.Exception ex) 
-            {
-                Console.WriteLine(ex.Message);
-            }
+						if (error == ZError.EAGAIN)
+						{
+							// If the queue hasn't sent us heartbeats in a while, destroy the
+							// socket and reconnect. This is the simplest most brutal way of
+							// discarding any messages we might have sent in the meantime:
+							if (--liveness == 0)
+							{
+								Console.WriteLine("W: heartbeat failure, can't reach queue");
+								Console.WriteLine("W: reconnecting in {0} ms", interval);
+								Thread.Sleep(interval);
 
-            return true;
-        }
+								if (interval < Worker.PPP_INTERVAL_MAX)
+								{
+									interval *= 2;
+								}
+								else {
+									Console.WriteLine("E: interrupted");
+									break;
+								}
 
-        static ZmqSocket ConnectWorker(ZmqContext context)
-        {
-            ZmqSocket worker = context.CreateSocket(SocketType.DEALER);
+								worker.Dispose();
+								if (null == (worker = PPWorker_CreateZSocket(context, name, out error)))
+								{
+									if (error == ZError.ETERM)
+										break;	// Interrupted
+									throw new ZException(error);
+								}
+								liveness = Worker.PPP_HEARTBEAT_LIVENESS;
+							}
+						}
 
-            //Set random identity to make tracing easier
-            ZHelpers.SetID(worker, Encoding.Unicode);
-            worker.Connect("tcp://localhost:5556");
+						// Send heartbeat to queue if it's time
+						if (DateTime.UtcNow > heartbeat_at) 
+						{
+							heartbeat_at = DateTime.UtcNow + Worker.PPP_HEARTBEAT_INTERVAL;
 
-            //Tell the queue we're ready for work
-            Console.WriteLine("I: worker ready");
-            worker.Send(PPP_READY, Encoding.Unicode);
-
-            return worker;
-        }
-    }
+							Console.WriteLine("I:   sending heartbeat");
+							using (var outgoing = new ZFrame(Worker.PPP_HEARTBEAT))
+							{
+								worker.Send(outgoing);
+							}
+						}
+					}
+				}
+				finally
+				{
+					if (worker != null)
+					{
+						worker.Dispose();
+						worker = null;
+					}
+				}
+			}
+		}
+	}
 }

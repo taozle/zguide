@@ -1,97 +1,172 @@
-//
-//  Lazy Pirate client
-//  Use zmq_poll to do a safe request-reply
-//  To run, start lpserver and then randomly kill/restart it
-
-//  Author:     Tomas Roos
-//  Email:      ptomasroos@gmail.com
-
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.lpclient
+namespace Examples
 {
-    internal class Program
-    {
-        private static int requestTimeout = 2500;
-        private static int requestRetries = 3;
-        private static string serverEndpoint = "tcp://127.0.0.1:5555";
+	static partial class Program
+	{
+		//
+		// Lazy Pirate client
+		// Use zmq_poll (pollItem.PollIn) to do a safe request-reply
+		// To run, start lpserver and then randomly kill/restart it
+		//
+		// Author: metadings
+		//
 
-        private static int sequence = 0;
-        private static bool expectReply = true;
-        private static int retriesLeft = requestRetries;
+		static TimeSpan LPClient_RequestTimeout = TimeSpan.FromMilliseconds(2000);
+		static int LPClient_RequestRetries = 3;
 
-        private static ZmqSocket CreateServerSocket(ZmqContext context)
-        {
-            Console.WriteLine("Connecting to server...");
+		static ZSocket LPClient_CreateZSocket(ZContext context, string name, out ZError error)
+		{
+			// Helper function that returns a new configured socket
+			// connected to the Lazy Pirate queue
 
-            var client = context.CreateSocket(SocketType.REQ);
-            client.Connect(serverEndpoint);
-            client.Linger = TimeSpan.Zero;
-            client.ReceiveReady += PollInHandler;
+			var requester = new ZSocket(context, ZSocketType.REQ);
+			requester.IdentityString = name;
+			requester.Linger = TimeSpan.FromMilliseconds(1);
 
-            return client;
-        }
+			if (!requester.Connect("tcp://127.0.0.1:5555", out error))
+			{
+				return null;
+			}
+			return requester;
+		}
 
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                var client = CreateServerSocket(context);
+		public static void LPClient(string[] args)
+		{
+			if (args == null || args.Length < 1)
+			{
+				Console.WriteLine();
+				Console.WriteLine("Usage: ./{0} LPClient [Name]", AppDomain.CurrentDomain.FriendlyName);
+				Console.WriteLine();
+				Console.WriteLine("    Name   Your name. Default: People");
+				Console.WriteLine();
+				args = new string[] { "People" };
+			}
 
-                while (retriesLeft > 0)
-                {
-                    sequence++;
-                    Console.WriteLine("Sending ({0})", sequence);
-                    client.Send(sequence.ToString(), Encoding.Unicode);
-                    expectReply = true;
+			string name = args[0];
 
-                    while (expectReply)
-                    {
-                        var poller = new Poller(new List<ZmqSocket> { client });
-                        int count = poller.Poll(TimeSpan.FromMilliseconds(requestTimeout * 1000));
+			using (var context = new ZContext())
+			{
+				ZSocket requester = null;
+				try
+				{ // using (requester)
 
-                        if (count == 0)
-                        {
-                            retriesLeft--;
+					ZError error;
 
-                            if (retriesLeft == 0)
-                            {
-                                Console.WriteLine("Server seems to be offline, abandoning");
-                                break;
-                            }
-                            else
-                            {
-                                Console.WriteLine("No response from server, retrying..");
+					if (null == (requester = LPClient_CreateZSocket(context, name, out error)))
+					{
+						if (error == ZError.ETERM)
+							return;	// Interrupted
+						throw new ZException(error);
+					}
 
-                                client = null;
-                                client = CreateServerSocket(context);
-                                client.Send(sequence.ToString(), Encoding.Unicode);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+					int sequence = 0;
+					int retries_left = LPClient_RequestRetries;
+					var poll = ZPollItem.CreateReceiver();
 
-        private static void PollInHandler(object sender, SocketEventArgs e)
-        {
-            var reply = e.Socket.Receive(Encoding.Unicode);
+					while (retries_left > 0)
+					{
+						// We send a request, then we work to get a reply
+						using (var outgoing = ZFrame.Create(4))
+						{
+							outgoing.Write(++sequence);
+							if (!requester.Send(outgoing, out error))
+							{
+								if (error == ZError.ETERM)
+									return;	// Interrupted
+								throw new ZException(error);
+							}
+						}
 
-            if (Int32.Parse(reply) == sequence)
-            {
-                Console.WriteLine("Server replied OK ({0})", reply);
-                retriesLeft = requestRetries;
-                expectReply = false;
-            }
-            else
-            {
-                Console.WriteLine("Malformed reply from server: {0}", reply);
-            }
+						ZMessage incoming;
+						while (true)
+						{
+							// Here we process a server reply and exit our loop
+							// if the reply is valid.
 
-        }
-    }
+							// If we didn't a reply, we close the client socket
+							// and resend the request. We try a number of times
+							// before finally abandoning:
+
+							// Poll socket for a reply, with timeout
+							if (requester.PollIn(poll, out incoming, out error, LPClient_RequestTimeout))
+							{
+								using (incoming)
+								{
+									// We got a reply from the server
+									int incoming_sequence = incoming[0].ReadInt32();
+									if (sequence == incoming_sequence)
+									{
+										Console.WriteLine("I: server replied OK ({0})", incoming_sequence);
+										retries_left = LPClient_RequestRetries;
+										break;
+									}
+									else
+									{
+										Console_WriteZMessage("E: malformed reply from server", incoming);
+									}
+								}
+							}
+							else
+							{
+								if (error == ZError.EAGAIN)
+								{
+									if (--retries_left == 0)
+									{
+										Console.WriteLine("E: server seems to be offline, abandoning");
+										break;
+									}
+
+									Console.WriteLine("W: no response from server, retrying...");
+
+									// Old socket is confused; close it and open a new one
+									requester.Dispose();
+									if (null == (requester = LPClient_CreateZSocket(context, name, out error)))
+									{
+										if (error == ZError.ETERM)
+											return;	// Interrupted
+										throw new ZException(error);
+									}
+
+									Console.WriteLine("I: reconnected");
+
+									// Send request again, on new socket
+									using (var outgoing = ZFrame.Create(4))
+									{
+										outgoing.Write(sequence);
+										if (!requester.Send(outgoing, out error))
+										{
+											if (error == ZError.ETERM)
+												return;	// Interrupted
+											throw new ZException(error);
+										}
+									}
+
+									continue;
+								}
+
+								if (error == ZError.ETERM)
+									return;	// Interrupted
+								throw new ZException(error);
+							}
+						}
+					}
+				}
+				finally
+				{
+					if (requester != null)
+					{
+						requester.Dispose();
+						requester = null;
+					}
+				}
+			}
+		}
+	}
 }

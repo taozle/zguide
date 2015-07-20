@@ -1,82 +1,139 @@
-﻿//
-//  Simple Pirate queue
-//  This is identical to the LRU pattern, with no reliability mechanisms
-//  at all. It depends on the client for recovery. Runs forever.
-//
-//  Author: Kristian Kristensen <kristian@kristenseninc.com>
-//  Based on lruqueue2 by Michael Compton, Tomas Roos
-
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.spqueue
+namespace Examples
 {
-    class Program
-    {
-        private const string LRU_READY = "READY";
+	static partial class Program
+	{
+		public static void SPQueue(string[] args)
+		{
+			//
+			// Simple Pirate broker
+			// This is identical to load-balancing pattern, with no reliability
+			// mechanisms. It depends on the client for recovery. Runs forever.
+			//
+			// Author: metadings
+			//
 
-        static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket frontend = context.CreateSocket(SocketType.ROUTER), backend = context.CreateSocket(SocketType.ROUTER))
-                {
-                    frontend.Bind("tcp://*:5555"); // For Clients
-                    backend.Bind("tcp://*:5556"); // For Workers
+			using (var context = new ZContext())
+			using (var frontend = new ZSocket(context, ZSocketType.ROUTER))
+			using (var backend = new ZSocket(context, ZSocketType.ROUTER))
+			{
+				frontend.Bind("tcp://*:5555");
+				backend.Bind("tcp://*:5556");
 
-                    //  Logic of LRU loop
-                    //  - Poll backend always, frontend only if 1+ worker ready
-                    //  - If worker replies, queue worker as ready and forward reply
-                    //    to client if necessary
-                    //  - If client requests, pop next worker and send request to it
+				// Queue of available workers
+				var worker_queue = new List<string>();
 
-                    //  Queue of available workers
-                    var workerQueue = new Queue<byte[]>();
+				ZError error;
+				ZMessage incoming;
+				var poll = ZPollItem.CreateReceiver();
 
-                    //  Handle worker activity on backend
-                    backend.ReceiveReady += (s, e) =>
-                                                 {
-                                                     var zmsg = new ZMessage(e.Socket);
-                                                     //  Use worker address for LRU routing
-                                                     workerQueue.Enqueue(zmsg.Unwrap());
+				while (true)
+				{
+					if (backend.PollIn(poll, out incoming, out error, TimeSpan.FromMilliseconds(64)))
+					{
+						using (incoming)
+						{
+							// Handle worker activity on backend
 
-                                                     //  Forward message to client if it's not a READY
-                                                     if (!Encoding.Unicode.GetString(zmsg.Address).Equals(LRU_READY))
-                                                     {
-                                                         zmsg.Send(frontend);
-                                                     }
-                                                 };
+							// incoming[0] is worker_id
+							string worker_id = incoming[0].ReadString();
+							// Queue worker identity for load-balancing
+							worker_queue.Add(worker_id);
 
-                    frontend.ReceiveReady += (s, e) =>
-                                                  {
-                                                      //  Now get next client request, route to next worker
-                                                      //  Dequeue and drop the next worker address
-                                                      var zmsg = new ZMessage(e.Socket);
-                                                      zmsg.Wrap(workerQueue.Dequeue(), new byte[0]);
-                                                      zmsg.Send(backend);
-                                                  };
+							// incoming[1] is empty
 
-                    var poller = new Poller(new ZmqSocket[] { frontend, backend });
+							// incoming[2] is READY or else client_id
+							string client_id = incoming[2].ReadString();
 
-                    while (true)
-                    {
-                        //int rc = ZmqContext.Poller(workerQueue.Count > 0
-                        //                            ? new List<ZmqSocket>(new ZmqSocket[] {frontend, backend})
-                        //                            : new List<ZmqSocket>(new ZmqSocket[] {backend}));
+							if (client_id == "READY")
+							{
+								Console.WriteLine("I: ({0}) worker ready", worker_id);
+							}
+							else
+							{
+								// incoming[3] is empty
 
-                        int rc = poller.Poll();
+								// incoming[4] is reply
+								// string reply = incoming[4].ReadString();
+								// int reply = incoming[4].ReadInt32();
 
-                        if (rc == -1)
-                        {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
+								Console.WriteLine("I: ({0}) work complete", worker_id);
+
+								using (var outgoing = new ZMessage())
+								{
+									outgoing.Add(new ZFrame(client_id));
+									outgoing.Add(new ZFrame());
+									outgoing.Add(incoming[4]);
+
+									// Send
+									frontend.Send(outgoing);
+								}
+							}
+						}
+					}
+					else
+					{
+						if (error == ZError.ETERM)
+							return;
+						if (error != ZError.EAGAIN)
+							throw new ZException(error);
+					}
+
+					if (worker_queue.Count > 0)
+					{
+						// Poll frontend only if we have available workers
+
+						if (frontend.PollIn(poll, out incoming, out error, TimeSpan.FromMilliseconds(64)))
+						{
+							using (incoming)
+							{
+								// Here is how we handle a client request
+
+								// Dequeue the next worker identity
+								string worker_id = worker_queue[0];
+								worker_queue.RemoveAt(0);
+
+								// incoming[0] is client_id
+								string client_id = incoming[0].ReadString();
+
+								// incoming[1] is empty
+
+								// incoming[2] is request
+								// string request = incoming[2].ReadString();
+								int request = incoming[2].ReadInt32();
+
+								Console.WriteLine("I: ({0}) working on ({1}) {2}", worker_id, client_id, request);
+
+								using (var outgoing = new ZMessage())
+								{
+									outgoing.Add(new ZFrame(worker_id));
+									outgoing.Add(new ZFrame());
+									outgoing.Add(new ZFrame(client_id));
+									outgoing.Add(new ZFrame());
+									outgoing.Add(incoming[2]);
+
+									// Send
+									backend.Send(outgoing);
+								}
+							}
+						}
+						else
+						{
+							if (error == ZError.ETERM)
+								return;
+							if (error != ZError.EAGAIN)
+								throw new ZException(error);
+						}
+					}
+				}
+			}
+		}
+	}
 }

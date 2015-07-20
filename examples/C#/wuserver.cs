@@ -1,44 +1,58 @@
-﻿//
-//  Weather update server
-//  Binds PUB socket to tcp://*:5556
-//  Publishes random weather updates
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
-using System;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net;
 using System.Text;
+using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.wuserver
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket publisher = context.CreateSocket(SocketType.PUB))
-                {
-                    publisher.Bind("tcp://*:5556");
+	static partial class Program
+	{
+		public static void WUServer(string[] args)
+		{
+			//
+			// Weather update server
+			// Binds PUB socket to tcp://*:5556
+			// Publishes random weather updates
+			//
+			// Author: metadings
+			//
 
-                    var randomizer = new Random(DateTime.Now.Millisecond);
+			// Prepare our context and publisher
+			using (var context = new ZContext())
+			using (var publisher = new ZSocket(context, ZSocketType.PUB))
+			{
+				string address = "tcp://*:5556";
+				Console.WriteLine("I: Publisher.Bind'ing on {0}", address);
+				publisher.Bind(address);
 
-                    while (true)
-                    {
-                        //  Get values that will fool the boss
-                        int zipcode = randomizer.Next(0, 100000);
-                        int temperature = randomizer.Next(-80, 135);
-                        int relativeHumidity = randomizer.Next(10, 60);
+				/* foreach (IPAddress localAddress in WUProxy_GetPublicIPs())
+				{
+					var epgmAddress = string.Format("epgm://{0};239.192.1.1:8100", localAddress);
+					Console.WriteLine("I: Publisher.Bind'ing on {0}...", epgmAddress);
+					publisher.Bind(epgmAddress);
+				} */
 
-                        string update = zipcode.ToString() + " " + temperature.ToString() + " " + relativeHumidity.ToString();
+				// Initialize random number generator
+				var rnd = new Random();
 
-                        //  Send message to 0..N subscribers via a pub socket
-                        publisher.Send(update, Encoding.Unicode);
-                    }
-                }
-            }
-        }
-    }
+				while (true)
+				{
+					// Get values that will fool the boss
+					int zipcode = rnd.Next(99999);
+					int temperature = rnd.Next(-55, +45);
+
+					// Send message to all subscribers
+					var update = string.Format("{0:D5} {1}", zipcode, temperature);
+					using (var updateFrame = new ZFrame(update))
+					{
+						publisher.Send(updateFrame);
+					}
+				}
+			}
+		}
+	}
 }

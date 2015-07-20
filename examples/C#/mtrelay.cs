@@ -1,69 +1,72 @@
-﻿//
-//  Multithreaded relay
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
-using System;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.mtrelay
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket socket = context.CreateSocket(SocketType.PAIR))
-                {
-                    //  Bind to inproc: endpoint, then start upstream thread
-                    socket.Bind("inproc://step3");
+	static partial class Program
+	{
+		public static void MTRelay(string[] args)
+		{
+			//
+			// Multithreaded relay
+			//
+			// Author: metadings
+			//
 
-                    var step2 = new Thread(Step2);
-                    step2.Start(context);
+			// Bind inproc socket before starting step2
+			using (var ctx = new ZContext())
+			using (var receiver = new ZSocket(ctx, ZSocketType.PAIR))
+			{
+				receiver.Bind("inproc://step3");
 
-                    //  Wait for signal
-                    socket.Receive(Encoding.Unicode);
+				new Thread(() => MTRelay_step2(ctx)).Start();
 
-                    Console.WriteLine("Test Successful!!!");
-                }
-            }
-        }
+				// Wait for signal
+				receiver.ReceiveFrame();
 
-        private static void Step2(object context)
-        {
-            //  Bind to inproc: endpoint, then start upstream thread
-            using (ZmqSocket receiver = ((ZmqContext)context).CreateSocket(SocketType.PAIR))
-            {
-                receiver.Bind("inproc://step2");
+				Console.WriteLine("Test successful!");
+			}
+		}
 
-                var step1 = new Thread(Step1);
-                step1.Start(context);
+		static void MTRelay_step2(ZContext ctx)
+		{
+			// Bind inproc socket before starting step1
+			using (var receiver = new ZSocket(ctx, ZSocketType.PAIR))
+			{
+				receiver.Bind("inproc://step2");
 
-                //  Wait for signal
-                receiver.Receive(Encoding.Unicode);
-            }
+				new Thread(() => MTRelay_step1(ctx)).Start();
 
-            //  Signal downstream to step 3
-            using (ZmqSocket sender = ((ZmqContext)context).CreateSocket(SocketType.PAIR))
-            {
-                sender.Connect("inproc://step3");
-                sender.Send("", Encoding.Unicode);
-            }
-        }
+				// Wait for signal and pass it on
+				receiver.ReceiveFrame();
+			}
 
-        private static void Step1(object context)
-        {
-            //  Signal downstream to step 2
-            using (ZmqSocket sender = ((ZmqContext)context).CreateSocket(SocketType.PAIR))
-            {
-                sender.Connect("inproc://step2");
-                sender.Send("", Encoding.Unicode);
-            }
-        }
-    }
+			// Connect to step3 and tell it we're ready
+			using (var xmitter = new ZSocket(ctx, ZSocketType.PAIR))
+			{
+				xmitter.Connect("inproc://step3");
+
+				Console.WriteLine("Step 2 ready, signaling step 3");
+				xmitter.Send(new ZFrame("READY"));
+			}
+		}
+
+		static void MTRelay_step1(ZContext ctx) 
+		{
+			// Connect to step2 and tell it we're ready
+			using (var xmitter = new ZSocket(ctx, ZSocketType.PAIR))
+			{
+				xmitter.Connect("inproc://step2");
+
+				Console.WriteLine("Step 1 ready, signaling step 2");
+				xmitter.Send(new ZFrame("READY"));
+			}
+		}
+
+	}
 }

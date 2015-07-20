@@ -1,34 +1,3 @@
-/*  =========================================================================
-    zmsg.hpp
-
-    Multipart message class for example applications.
-
-    Follows the ZFL class conventions and is further developed as the ZFL
-    zfl_msg class.  See http://zfl.zeromq.org for more details.
-
-    -------------------------------------------------------------------------
-    Copyright (c) 1991-2010 iMatix Corporation <www.imatix.com>
-    Copyright other contributors as noted in the AUTHORS file.
-
-    This file is part of the ZeroMQ Guide: http://zguide.zeromq.org
-
-    This is free software; you can redistribute it and/or modify it under the
-    terms of the GNU Lesser General Public License as published by the Free
-    Software Foundation; either version 3 of the License, or (at your option)
-    any later version.
-
-    This software is distributed in the hope that it will be useful, but
-    WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABIL-
-    ITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General
-    Public License for more details.
-
-    You should have received a copy of the GNU Lesser General Public License
-    along with this program. If not, see <http://www.gnu.org/licenses/>.
-    =========================================================================
-
-    Andreas Hoelzlwimmer <andreas.hoelzlwimmer@fh-hagenberg.at>
-*/
-
 #ifndef __ZMSG_H_INCLUDED__
 #define __ZMSG_H_INCLUDED__
 
@@ -82,7 +51,7 @@ public:
    }
 
    void set_part(size_t part_nbr, unsigned char *data) {
-       if (part_nbr < m_part_data.size() && part_nbr >= 0) {
+       if (part_nbr < m_part_data.size()) {
            m_part_data[part_nbr] = data;
        }
    }
@@ -110,7 +79,7 @@ public:
             data[message.size()] = 0;
             push_back((char *)data.c_str());
          }
-         int64_t more = 0;
+         int more = 0;
          size_t more_size = sizeof(more);
          socket.getsockopt(ZMQ_RCVMORE, &more, &more_size);
          if (!more) {
@@ -270,11 +239,11 @@ public:
       push_front((char*)address);
    }
 
-   char * unwrap() {
+   std::string unwrap() {
       if (m_part_data.size() == 0) {
          return NULL;
       }
-      char *addr = (char*)pop_front().c_str();
+      std::string addr = (char*)pop_front().c_str();
       if (address() && *address() == 0) {
          pop_front();
       }

@@ -1,33 +1,3 @@
-/*  =====================================================================
-    mdwrkapi.hpp
-
-    Majordomo Protocol Worker API
-    Implements the MDP/Worker spec at http://rfc.zeromq.org/spec:7.
-
-    ---------------------------------------------------------------------
-    Copyright (c) 1991-2011 iMatix Corporation <www.imatix.com>
-    Copyright other contributors as noted in the AUTHORS file.
-
-    This file is part of the ZeroMQ Guide: http://zguide.zeromq.org
-
-    This is free software; you can redistribute it and/or modify it under
-    the terms of the GNU Lesser General Public License as published by
-    the Free Software Foundation; either version 3 of the License, or (at
-    your option) any later version.
-
-    This software is distributed in the hope that it will be useful, but
-    WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-    Lesser General Public License for more details.
-
-    You should have received a copy of the GNU Lesser General Public
-    License along with this program. If not, see
-    <http://www.gnu.org/licenses/>.
-    =====================================================================
-
-        Andreas Hoelzlwimmer <andreas.hoelzlwimmer@fh-hagenberg.at>
-*/
-
 #ifndef __MDWRKAPI_HPP_INCLUDED__
 #define __MDWRKAPI_HPP_INCLUDED__
 
@@ -47,7 +17,7 @@ public:
 
     mdwrk (std::string broker, std::string service, int verbose)
     {
-        s_version_assert (2, 1);
+        s_version_assert (4, 0);
 
         m_broker = broker;
         m_service = service;
@@ -94,6 +64,7 @@ public:
             msg->dump ();
         }
         msg->send (*m_worker);
+        delete msg;
     }
 
     //  ---------------------------------------------------------------------
@@ -107,6 +78,7 @@ public:
         m_worker = new zmq::socket_t (*m_context, ZMQ_DEALER);
         int linger = 0;
         m_worker->setsockopt (ZMQ_LINGER, &linger, sizeof (linger));
+        s_set_id(*m_worker);
         m_worker->connect (m_broker.c_str());
         if (m_verbose)
             s_console ("I: connecting to broker at %s...", m_broker.c_str());
@@ -161,7 +133,7 @@ public:
         while (!s_interrupted) {
             zmq::pollitem_t items [] = {
                 { *m_worker,  0, ZMQ_POLLIN, 0 } };
-            zmq::poll (items, 1, m_heartbeat * 1000);
+            zmq::poll (items, 1, m_heartbeat);
 
             if (items [0].revents & ZMQ_POLLIN) {
                 zmsg *msg = new zmsg(*m_worker);
@@ -212,9 +184,9 @@ public:
                 connect_to_broker ();
             }
             //  Send HEARTBEAT if it's time
-            if (s_clock () > m_heartbeat_at) {
+            if (s_clock () >= m_heartbeat_at) {
                 send_to_broker ((char*)MDPW_HEARTBEAT, "", NULL);
-                m_heartbeat_at = s_clock () + m_heartbeat;
+                m_heartbeat_at += m_heartbeat;
             }
         }
         if (s_interrupted)

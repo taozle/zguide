@@ -1,37 +1,48 @@
-﻿//
-//  Pubsub envelope publisher
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.psenvpub
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket publisher = context.CreateSocket(SocketType.PUB))
-                {
-                    publisher.Bind("tcp://*:5563");
+	static partial class Program
+	{
+		public static void PSEnvPub(string[] args)
+		{
+			//
+			// Pubsub envelope publisher
+			//
+			// Author: metadings
+			//
 
-                    while (true)
-                    {
-                        //  Write two messages, each with an envelope and content
-                        publisher.SendMore("A", Encoding.Unicode);
-                        publisher.Send("We don't want to see this.", Encoding.Unicode);
-                        publisher.SendMore("B", Encoding.Unicode);
-                        publisher.Send("We would like to see this.", Encoding.Unicode);
-                        Thread.Sleep(1000); // avoid flooding the publisher
-                    }
-                }
-            }
-        }
-    }
+			// Prepare our context and publisher
+			using (var context = new ZContext())
+			using (var publisher = new ZSocket(context, ZSocketType.PUB))
+			{
+				publisher.Linger = TimeSpan.Zero;
+				publisher.Bind("tcp://*:5563");
+
+				while (true)
+				{
+					// Write two messages, each with an envelope and content
+					using (var message = new ZMessage())
+					{
+						message.Add(new ZFrame("A"));
+						message.Add(new ZFrame("We don't want to see this"));
+						publisher.Send(message);
+					}
+					using (var message = new ZMessage())
+					{
+						message.Add(new ZFrame("B"));
+						message.Add(new ZFrame("We would like to see this"));
+						publisher.Send(message);
+					}
+					Thread.Sleep(1000);
+				}
+			}
+		}
+	}
 }

@@ -1,47 +1,96 @@
-//
-//  Shows how to handle Ctrl-C
-//
-
-//  Author:     Tomas Roos
-//  Email:      ptomasroos@gmail.com
-
-using System;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.interrupt
+namespace Examples
 {
-    internal class Program
-    {
+	static partial class Program
+	{
+		public static void Interrupt(string[] args)
+		{
+			//
+			// Interrupt
+			//
+			// Author: metadings
+			//
 
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket replyer = context.CreateSocket(SocketType.REP))
-                {
-                    replyer.Bind("tcp://*:5555");
+			if (args == null || args.Length == 0)
+			{
+				args = new string[] { "World" };
+			}
 
-                    bool interrupted = false;
+			string name = args[0];
 
-                    Console.CancelKeyPress += delegate { interrupted = true; };
+			var error = default(ZError);
 
-                    const string replyMessage = "World";
+			using (var context = new ZContext())
+			using (var responder = new ZSocket(context, ZSocketType.REP))
+			{
+				Console.CancelKeyPress += (s, ea) => 
+				{ 
+					ea.Cancel = true;
+					context.Shutdown(); 
+				};
 
-                    while (!interrupted)
-                    {
-                        string message = replyer.Receive(Encoding.Unicode);
-                        Console.WriteLine("Received request: {0}", message);
+				responder.Bind("tcp://*:5555");
 
-                        // Simulate work, by sleeping
-                        Thread.Sleep(1000);
+				ZFrame request;
 
-                        // Send reply back to client
-                        replyer.Send(replyMessage, Encoding.Unicode);
-                    }
-                }
-            }
-        }
-    }
+				while (true)
+				{
+					if (Console.KeyAvailable)
+					{
+						ConsoleKeyInfo info = Console.ReadKey(true);
+						/* if (info.Modifiers == ConsoleModifiers.Control && info.Key == ConsoleKey.C)
+						{
+							context.Shutdown();
+						} /**/
+						if (info.Key == ConsoleKey.Escape)
+						{
+							context.Shutdown();
+						}
+					}
+
+					if (null == (request = responder.ReceiveFrame(ZSocketFlags.DontWait, out error)))
+					{
+						if (error == ZError.EAGAIN)
+						{
+							Thread.Sleep(1);
+							continue;
+						}
+						if (error == ZError.ETERM)
+							break;	// Interrupted
+						throw new ZException(error);
+					}
+
+					using (request)
+					{
+						Console.Write("Received: {0}!", request.ReadString());
+
+						Thread.Sleep(512);	// See also the much slower reaction
+
+						Console.WriteLine(" Sending {0}... ", name);
+
+						if (!responder.Send(new ZFrame(name), out error))
+						{
+							if (error == ZError.ETERM)
+								break;	// Interrupted
+							throw new ZException(error);
+						}
+					}
+				}
+
+				if (error == ZError.ETERM)
+				{
+					Console.WriteLine("Terminated! You have pressed CTRL+C or ESC.");
+					return;
+				}
+				throw new ZException(error);
+			}
+		}
+	}
 }

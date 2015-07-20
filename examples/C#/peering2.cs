@@ -1,250 +1,344 @@
-//
-//  Broker peering simulation (part 2) in C#
-//  Prototypes the request-reply flow
-//
-//  While this example runs in a single process, that is just to make
-//  it easier to start and stop the example. Each thread has its own
-//  context and conceptually acts as a separate process.
-//
-//  Note! ipc doesnt work on windows and therefore type peering2 801 802 803
-
-//  Author:     Tomas Roos
-//  Email:      ptomasroos@gmail.com
-
-using System;
-using System.Linq;
+﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading;
+
 using ZeroMQ;
-using ZeroMQ.Interop;
 
-namespace zguide.peering2
+namespace Examples
 {
-    internal class Program
-    {
-        private const int numberOfClients = 10;
-        private const int numberOfWorkers = 3;
-        private static string cloudFeAddress;
-        private static string localBeAddress;
-        private static string localFeAddress;
-        private static readonly Random randomizer = new Random(DateTime.Now.Millisecond);
-        private static List<string> peers = new List<string>();
+	static partial class Program
+	{
+		//
+		// Broker peering simulation (part 2)
+		// Prototypes the request-reply flow
+		//
+		// Author: metadings
+		//
 
-        public static void Main(string[] args)
-        {
-            if (args.Length < 2)
-            {
-                Console.WriteLine("Usage: peering2 <myself> <peer_1> ... <peer_N>");
-                return;
-            }
+		static int Peering2_Clients = 10;
+		static int Peering2_Workers = 3;
 
-            var myself = args[0];
-            Console.WriteLine("Hello, I am " + myself);
+		static void Peering2_ClientTask(ZContext context, int i, string name, string message) 
+		{
+			// The client task does a request-reply dialog
+			// using a standard synchronous REQ socket
 
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket cloudfe = context.CreateSocket(SocketType.ROUTER), cloudbe = context.CreateSocket(SocketType.ROUTER),
-                    localfe = context.CreateSocket(SocketType.ROUTER), localbe = context.CreateSocket(SocketType.ROUTER))
-                {
-                    cloudFeAddress = "tcp://127.0.0.1:" + myself;
-                    cloudfe.Identity = Encoding.Unicode.GetBytes(myself);
-                    cloudfe.Bind(cloudFeAddress);
+			using (var client = new ZSocket(context, ZSocketType.REQ))
+			{
+				// Set printable identity
+				client.IdentityString = name;
 
-                    cloudbe.Identity = Encoding.Unicode.GetBytes(myself);
-                    for (int arg = 1; arg < args.Length; arg++)
-                    {
-                        var endpoint = "tcp://127.0.0.1:" + args[arg];
-                        peers.Add(endpoint);
-                        Console.WriteLine("I: connecting to cloud frontend at " + endpoint);
-                        cloudbe.Connect(endpoint);
-                    }
+				// Connect
+				client.Connect("tcp://127.0.0.1:" + Peering2_GetPort(name) + 1);
 
-                    localFeAddress = cloudFeAddress + "1";
-                    localfe.Bind(localFeAddress);
-                    localBeAddress = cloudFeAddress + "2";
-                    localbe.Bind(localBeAddress);
+				ZError error;
 
-                    Console.WriteLine("Press Enter when all brokers are started: ");
-                    Console.ReadKey();
+				while (true)
+				{
+					// Send
+					using (var outgoing = new ZFrame(message))
+					{
+						client.Send(outgoing);
+					}
 
-                    var workers = new List<Thread>();
-                    for (int workerNumber = 0; workerNumber < numberOfWorkers; workerNumber++)
-                    {
-                        workers.Add(new Thread(WorkerTask));
-                        workers[workerNumber].Start();
-                    }
+					// Receive
+					ZFrame incoming = client.ReceiveFrame(out error);
 
-                    var clients = new List<Thread>();
-                    for (int clientNumber = 0; clientNumber < numberOfClients; clientNumber++)
-                    {
-                        clients.Add(new Thread(ClientTask));
-                        clients[clientNumber].Start();
-                    }
+					if (incoming == null)
+					{
+						if (error == ZError.ETERM)
+							return;	// Interrupted
 
-                    var workerQueue = new Queue<byte[]>();
+						throw new ZException(error);
+					}
+					using (incoming)
+					{
+						Console.WriteLine("Client {0}: {1}", name, incoming.ReadString());
+					}
+				}
+			}
+		}
 
-                    var localfeReady = false;
-                    var cloudfeReady = false;
+		static void Peering2_WorkerTask(ZContext context, int i, string name) 
+		{
+			// The worker task plugs into the load-balancer using a REQ socket
 
-                    var backends = new Poller();
+			using (var worker = new ZSocket(context, ZSocketType.REQ))
+			{
+				// Set printable identity
+				worker.IdentityString = name;
 
-                    localbe.ReceiveReady += (socket, revents) =>
-                                                     {
-                                                         var zmsg = new ZMessage(revents.Socket);
+				// Connect
+				worker.Connect("tcp://127.0.0.1:" + Peering2_GetPort(name) + 2);
 
-                                                         //  Use worker address for LRU routing
-                                                         workerQueue.Enqueue(zmsg.Unwrap());
+				// Tell broker we're ready for work
+				worker.Send(new ZFrame("READY"));
 
-                                                         if (zmsg.BodyToString() != "READY")
-                                                         {
-                                                             SendReply(zmsg, cloudfe, localfe);
-                                                         }
-                                                     };
+				// Process messages as they arrive
+				ZError error;
+				while (true)
+				{
+					// Receive
+					ZFrame incoming = worker.ReceiveFrame(out error);
 
+					if (incoming == null)
+					{
+						if (error == ZError.ETERM)
+							return;	// Interrupted
 
-                    cloudbe.ReceiveReady += (socket, revents) =>
-                    {
-                        var zmsg = new ZMessage(revents.Socket);
-                        //  We don't use peer broker address for anything
-                        zmsg.Unwrap();
+						throw new ZException(error);
+					}
+					using (incoming)
+					{
+						Console.WriteLine("Worker {0}: {1}", name, incoming.ReadString());
 
-                        SendReply(zmsg, cloudfe, localfe);
-                    };
+						// Do some heavy work
+						Thread.Sleep(1);
 
-                    var frontends = new Poller();
-                    cloudfe.ReceiveReady += (socket, revents) =>
-                                                    {
-                                                        cloudfeReady = true;
-                                                    };
+						// Send
+						using (var outgoing = new ZFrame("OK"))
+						{
+							worker.Send(outgoing);
+						}
+					}
+				}
+			}
+		}
 
-                    localfe.ReceiveReady += (socket, revents) =>
-                                                     {
-                                                         localfeReady = true;
-                                                     };
+		// The main task begins by setting-up its frontend and backend sockets
+		// and then starting its client and worker tasks:
+		public static void Peering2(string[] args)
+		{
+			// First argument is this broker's name
+			// Other arguments are our peers' names
+			//
+			if (args == null || args.Length < 3)
+			{
+				if (args != null && args.Length == 1)
+				{
+					args = new string[] { args[0], "Me", "You" };
+				}
+				else
+				{
+					Console.WriteLine("Usage: {0} Peering2 Hello Me You", AppDomain.CurrentDomain.FriendlyName);
+					Console.WriteLine("       {0} Peering2 Message You Me", AppDomain.CurrentDomain.FriendlyName);
+					return;
+				}
+			}
 
+			string message = args[0];
 
-                    while (true)
-                    {
-                        var timeout = (workerQueue.Count > 0 ? 1000000 : -1);
-                        var rc = backends.Poll(TimeSpan.FromMilliseconds(timeout));
+			string name = args[1];
+			Console.WriteLine("I: preparing broker as {0}", name);
 
-                        if (rc == -1)
-                            break; // Interrupted
+			using (var context = new ZContext())
+			using (var cloudFrontend = new ZSocket(context, ZSocketType.ROUTER))
+			using (var cloudBackend = new ZSocket(context, ZSocketType.ROUTER))
+			using (var localFrontend = new ZSocket(context, ZSocketType.ROUTER))
+			using (var localBackend = new ZSocket(context, ZSocketType.ROUTER))
+			{
+				// Bind cloud frontend to endpoint
+				cloudFrontend.IdentityString = name;
+				cloudFrontend.Bind("tcp://127.0.0.1:" + Peering2_GetPort(name) + 0);
 
-                        while (workerQueue.Count > 0)
-                        {
-                            frontends.Poll(TimeSpan.Zero);
-                            bool reRoutable;
+				// Connect cloud backend to all peers
+				cloudBackend.IdentityString = name;
+				for (int i = 2; i < args.Length; ++i)
+				{
+					string peer = args[i];
+					Console.WriteLine("I: connecting to cloud frontend at {0}", peer);
+					cloudBackend.Connect("tcp://127.0.0.1:" + Peering2_GetPort(peer) + 0);
+				}
 
-                            ZMessage msg;
+				// Prepare local frontend and backend
+				localFrontend.Bind("tcp://127.0.0.1:" + Peering2_GetPort(name) + 1);
+				localBackend.Bind("tcp://127.0.0.1:" + Peering2_GetPort(name) + 2);
 
-                            if (cloudfeReady)
-                            {
-                                cloudfeReady = false;
-                                msg = new ZMessage(cloudfe);
-                                reRoutable = false;
-                            }
-                            else if (localfeReady)
-                            {
-                                localfeReady = false;
-                                msg = new ZMessage(localfe);
-                                reRoutable = true;
-                            }
-                            else
-                            {
-                                break;
-                            }
+				// Get user to tell us when we can start...
+				Console.WriteLine("Press ENTER when all brokers are started...");
+				Console.ReadKey(true);
 
-                            //if (reRoutable && workerQueue.Count > 0 && randomizer.Next(3) == 0)
-                            if (reRoutable && peers.Count > 0 && randomizer.Next(4) == 0)
-                            {
-                                var randomPeer = randomizer.Next(1, args.Length - 1);
-                                var endpoint = "tcp://127.0.0.1:" + args[randomPeer];
-                                msg.Wrap(Encoding.Unicode.GetBytes(endpoint), new byte[0]);
-                                msg.Send(cloudbe);
-                            }
-                            else
-                            {
-                                msg.Wrap(workerQueue.Dequeue(), new byte[0]);
-                                msg.Send(localbe);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+				// Start local workers
+				for (int i = 0; i < Peering2_Workers; ++i)
+				{
+					int j = i; new Thread(() => Peering2_WorkerTask(context, j, name)).Start();
+				}
 
-        private static void SendReply(ZMessage msg, ZmqSocket cloudfe, ZmqSocket localfe)
-        {
-            var address = Encoding.Unicode.GetString(msg.Address);
-            //  Route reply to cloud if it's addressed to a broker
+				// Start local clients
+				for (int i = 0; i < Peering2_Clients; ++i)
+				{
+					int j = i; new Thread(() => Peering2_ClientTask(context, j, name, message)).Start();
+				}
 
-            if (peers.Count(peerAddress => peerAddress == address) == 1)
-            {
-                Console.WriteLine("Sending to cloud frontend");
-                msg.Send(cloudfe);
-            }
-            else
-            {
-                Console.WriteLine("Sending to local frontend");
-                msg.Send(localfe);
-            }
-        }
+				// Here, we handle the request-reply flow. We're using load-balancing
+				// to poll workers at all times, and clients only when there are one
+				// or more workers available.
 
-        private static void WorkerTask()
-        {
-            using (var ctx = ZmqContext.Create())
-            {
-                using (var worker = ctx.CreateSocket(SocketType.REQ))
-                {
-                    ZHelpers.SetID(worker, Encoding.Unicode);
-                    worker.Connect(localBeAddress);
+				// Least recently used queue of available workers
+				var workers = new List<string>();
 
-                    var msg = new ZMessage("READY");
-                    msg.Send(worker);
+				ZError error;
+				ZMessage incoming;
+				TimeSpan? wait;
+				var poll = ZPollItem.CreateReceiver();
 
-                    while (true)
-                    {
-                        var recvMsg = new ZMessage(worker);
-                        Console.WriteLine("Worker: {0}", recvMsg.BodyToString());
+				while (true)
+				{
+					// If we have no workers, wait indefinitely
+					wait = workers.Count > 0 ? (TimeSpan?)TimeSpan.FromMilliseconds(1000) : null;
 
-                        Thread.Sleep(1000);
+					// Poll localBackend
+					if (localBackend.PollIn(poll, out incoming, out error, wait))
+					{
+						// Handle reply from local worker
+						string identity = incoming[0].ReadString();
+						workers.Add(identity);
 
-                        recvMsg.StringToBody("OK");
-                        recvMsg.Send(worker);
-                        //var okmsg = new ZMessage("OK");
-                        //okmsg.Send(worker);
-                    }
-                }
-            }
-        }
+						// If it's READY, don't route the message any further
+						string hello = incoming[2].ReadString();
+						if (hello == "READY")
+						{
+							incoming.Dispose();
+							incoming = null;
+						}
+					}
+					else if (error == ZError.EAGAIN && cloudBackend.PollIn(poll, out incoming, out error, wait))
+					{
+						// We don't use peer broker identity for anything
 
-        private static void ClientTask()
-        {
-            using (var ctx = ZmqContext.Create())
-            {
-                using (var client = ctx.CreateSocket(SocketType.REQ))
-                {
-                    ZHelpers.SetID(client, Encoding.Unicode);
-                    client.Connect(localFeAddress);
+						// string identity = incoming[0].ReadString();
 
-                    while (true)
-                    {
-                        client.Send("HELLO", Encoding.Unicode);
-                        string reply = client.Receive(Encoding.Unicode);
+						// string ok = incoming[2].ReadString();
+					}
+					else
+					{
+						if (error == ZError.ETERM)
+							return;	// Interrupted
 
-                        if (string.IsNullOrEmpty(reply))
-                        {
-                            break;
-                        }
+						if (error != ZError.EAGAIN)
+							throw new ZException(error);
+					}
 
-                        Console.WriteLine("Client: {0}", reply);
+					if (incoming != null)
+					{
+						// Route reply to cloud if it's addressed to a broker
+						string identity = incoming[0].ReadString();
 
-                        Thread.Sleep(1000);
-                    }
-                }
-            }
-        }
-    }
+						for (int i = 2; i < args.Length; ++i)
+						{
+							if (identity == args[i])
+							{
+								using (incoming)
+									cloudFrontend.Send(incoming);
+
+								incoming = null;
+								break;
+							}
+						}
+					}
+
+					// Route reply to client if we still need to
+					if (incoming != null)
+					{
+						using (incoming)
+							localFrontend.Send(incoming);
+
+						incoming = null;
+					}
+
+					// Now we route as many client requests as we have worker capacity
+					// for. We may reroute requests from our local frontend, but not from //
+					// the cloud frontend. We reroute randomly now, just to test things
+					// out. In the next version, we'll do this properly by calculating
+					// cloud capacity://
+
+					var rnd = new Random();
+
+					while (workers.Count > 0)
+					{
+						int reroutable = 0;
+
+						// We'll do peer brokers first, to prevent starvation
+
+						if (localFrontend.PollIn(poll, out incoming, out error, TimeSpan.FromMilliseconds(64)))
+						{
+							reroutable = 0;
+						}
+						else if (error == ZError.EAGAIN && cloudFrontend.PollIn(poll, out incoming, out error, TimeSpan.FromMilliseconds(64)))
+						{
+							reroutable = 1;
+						}
+						else
+						{
+							if (error == ZError.ETERM)
+								return;	// Interrupted
+
+							if (error == ZError.EAGAIN)
+								break;	// No work, go back to backends
+
+							throw new ZException(error);
+						}
+
+						using (incoming)
+						{
+							// If reroutable, send to cloud 25% of the time
+							// Here we'd normally use cloud status information
+							//
+							if (reroutable == 1 && rnd.Next(4) == 0)
+							{
+								// Route to random broker peer
+
+								int peer = rnd.Next(args.Length - 2) + 2;
+
+								incoming.ReplaceAt(0, new ZFrame(args[peer]));
+
+								/* using (var outgoing = new ZMessage())
+								{
+									outgoing.Add(new ZFrame(args[peer]));
+									outgoing.Add(new ZFrame());
+									outgoing.Add(incoming[2]);
+
+									cloudBackend.Send(outgoing);
+								} /**/
+
+								cloudBackend.Send(incoming);
+							}
+							else
+							{
+								// Route to local broker peer
+
+								string peer = workers[0];
+
+								workers.RemoveAt(0);
+								incoming.ReplaceAt(0, new ZFrame(peer));
+
+								/* using (var outgoing = new ZMessage())
+								{
+									outgoing.Add(new ZFrame(peer));
+									outgoing.Add(new ZFrame());
+									outgoing.Add(incoming[2]);
+
+									localBackend.Send(outgoing);
+								} /**/
+
+								localBackend.Send(incoming);
+							}
+						}
+					}
+				}
+			}
+		}
+
+		static Int16 Peering2_GetPort(string name) 
+		{
+			var hash = (Int16)name[0];
+			if (hash < 1024)
+			{
+				hash += 1024;
+			}
+			return hash;
+		}
+	}
 }

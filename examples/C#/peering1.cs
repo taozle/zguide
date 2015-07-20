@@ -1,72 +1,106 @@
-//
-//  Broker peering simulation (part 1) in C#
-//  Prototypes the state flow
-//  Note! ipc doesnt work on windows and therefore type peering1 8001 8002 8003
-
-//  Author:     Tomas Roos
-//  Email:      ptomasroos@gmail.com
-
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.peering1
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            var randomizer = new Random(DateTime.Now.Millisecond);
+	static partial class Program
+	{
+		//
+		// Broker peering simulation (part 1)
+		// Prototypes the state flow
+		//
+		// Author: metadings
+		//
 
-            if (args.Length < 2)
-            {
-                Console.WriteLine("Usage: peering1 <myself> <peer_1> ... <peer_N>");
-                return;
-            }
+		public static void Peering1(string[] args)
+		{
+			// First argument is this broker's name
+			// Other arguments are our peers' names
+			//
+			if (args == null || args.Length < 2)
+			{
+				Console.WriteLine();
+				Console.WriteLine("Usage: {0} Peering1 World Receiver0", AppDomain.CurrentDomain.FriendlyName);
+				Console.WriteLine("       {0} Peering1 Receiver0 World", AppDomain.CurrentDomain.FriendlyName);
+				Console.WriteLine();
+				return;
+			}
+			string self = args[0];
+			Console.WriteLine("I: preparing broker as {0}", self);
 
-            var myself = args[0];
-            Console.WriteLine("Hello, I am " + myself);
+			using (var context = new ZContext())
+			using (var backend = new ZSocket(context, ZSocketType.PUB))
+			using (var frontend = new ZSocket(context, ZSocketType.SUB))
+			{
+				// Bind backend to endpoint
+				backend.Bind("tcp://127.0.0.1:" + Peering1_GetPort(self));
 
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket statebe = context.CreateSocket(SocketType.PUB), statefe = context.CreateSocket(SocketType.SUB))
-                {
-                    var bindAddress = "tcp://127.0.0.1:" + myself;
-                    statebe.Bind(bindAddress);
-                    Thread.Sleep(1000);
+				// Connect frontend to all peers
+				frontend.SubscribeAll();
+				for (int i = 1; i < args.Length; ++i)
+				{
+					string peer = args[i];
+					Console.WriteLine("I: connecting to state backend at {0}", peer);
+					frontend.Connect("tcp://127.0.0.1:" + Peering1_GetPort(peer));
+				}
 
-                    for (int arg = 1; arg < args.Length; arg++)
-                    {
-                        var endpoint = "tcp://127.0.0.1:" + args[arg];
-                        statefe.Connect(endpoint);
-                        statefe.Subscribe(Encoding.Unicode.GetBytes(string.Empty));
-                        Thread.Sleep(1000);
-                    }
+				// The main loop sends out status messages to peers, and collects
+				// status messages back from peers. The zmq_poll timeout defines
+				// our own heartbeat:
 
-                    statefe.ReceiveReady += (s, e) =>
-                                                 {
-                                                     string peerName = e.Socket.Receive(Encoding.Unicode);
-                                                     string available = e.Socket.Receive(Encoding.Unicode);
+				ZError error;
+				ZMessage incoming;
+				var poll = ZPollItem.CreateReceiver();
+				var rnd = new Random();
 
-                                                     Console.WriteLine("{0} - {1} workers free\n", peerName, available);
-                                                 };
+				while (true)
+				{
+					// Poll for activity, or 1 second timeout
+					if (!frontend.PollIn(poll, out incoming, out error, TimeSpan.FromSeconds(1)))
+					{
+						if (error == ZError.EAGAIN)
+						{
+							using (var output = new ZMessage())
+							{
+								output.Add(new ZFrame(self));
 
-                    var poller = new Poller(new List<ZmqSocket> { statefe });
+								var outputNumber = ZFrame.Create(4);
+								outputNumber.Write(rnd.Next(10));
+								output.Add(outputNumber);
 
-                    while (true)
-                    {
-                        int count = poller.Poll(TimeSpan.FromMilliseconds(1000 * 1000));
-                        
-                        if (count == 0)
-                        {
-                            statebe.Send(myself, Encoding.Unicode);
-                            statebe.Send(randomizer.Next(10).ToString(), Encoding.Unicode);
-                        }
-                    }
-                }
-            }
-        }
-    }
+								backend.Send(output);
+							}
+
+							continue;
+						}
+						if (error == ZError.ETERM)
+							return;
+
+						throw new ZException(error);
+					}
+					using (incoming)
+					{
+						string peer_name = incoming[0].ReadString();
+						int available = incoming[1].ReadInt32();
+						Console.WriteLine("{0} - {1} workers free", peer_name, available);
+					}
+				}
+			}
+		}
+
+		static Int16 Peering1_GetPort(string name)
+		{
+			var hash = (Int16)name[0];
+			if (hash < 1024)
+			{
+				hash += 1024;
+			}
+			return hash;
+		}
+	}
 }

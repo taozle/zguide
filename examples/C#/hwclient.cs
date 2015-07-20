@@ -1,41 +1,58 @@
-﻿//
-//  Hello World client
-//  Connects REQ socket to tcp://localhost:5555
-//  Sends "Hello" to server, expects "World" back
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
-using System;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
+using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.hwclient
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket requester = context.CreateSocket(SocketType.REQ))
-                {
-                    requester.Connect("tcp://localhost:5555");
+	static partial class Program
+	{
+		public static void HWClient(string[] args)
+		{
+			//
+			// Hello World client
+			//
+			// Author: metadings
+			//
 
-                    const string requestMessage = "Hello";
-                    const int requestsToSend = 10;
+			if (args == null || args.Length < 1)
+			{
+				Console.WriteLine();
+				Console.WriteLine("Usage: ./{0} HWClient [Endpoint]", AppDomain.CurrentDomain.FriendlyName);
+				Console.WriteLine();
+				Console.WriteLine("    Endpoint  Where HWClient should connect to.");
+				Console.WriteLine("              Default is tcp://127.0.0.1:5555");
+				Console.WriteLine();
+				args = new string[] { "tcp://127.0.0.1:5555" };
+			}
 
-                    for (int requestNumber = 0; requestNumber < requestsToSend; requestNumber++)
-                    {
-                        Console.WriteLine("Sending request {0}...", requestNumber);
-                        requester.Send(requestMessage, Encoding.Unicode);
+			string endpoint = args[0];
 
-                        string reply = requester.Receive(Encoding.Unicode);
-                        Console.WriteLine("Received reply {0}: {1}", requestNumber, reply);
-                    }
-                }
-            }
-        }
-    }
+			// Create
+			using (var context = new ZContext())
+			using (var requester = new ZSocket(context, ZSocketType.REQ))
+			{
+				// Connect
+				requester.Connect(endpoint);
+
+				for (int n = 0; n < 10; ++n)
+				{
+					string requestText = "Hello";
+					Console.Write("Sending {0}...", requestText);
+
+					// Send
+					requester.Send(new ZFrame(requestText));
+
+					// Receive
+					using (ZFrame reply = requester.ReceiveFrame()) 
+					{
+						Console.WriteLine(" Received: {0} {1}!", requestText, reply.ReadString());
+					}
+				}
+			}
+		}
+	}
 }

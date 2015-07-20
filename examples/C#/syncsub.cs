@@ -1,46 +1,63 @@
-﻿//
-//  Synchronized subscriber
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
-using System;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.syncsub
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket subscriber = context.CreateSocket(SocketType.SUB), syncClient = context.CreateSocket(SocketType.REQ))
-                {
-                    subscriber.Connect("tcp://localhost:5561");
-                    subscriber.Subscribe(Encoding.Unicode.GetBytes(string.Empty));
+	static partial class Program
+	{
+		public static void SyncSub(string[] args)
+		{
+			//
+			// Synchronized subscriber
+			//
+			// Author: metadings
+			//
 
-                    syncClient.Connect("tcp://localhost:5562");
+			using (var context = new ZContext())
+			using (var subscriber = new ZSocket(context, ZSocketType.SUB))
+			using (var syncclient = new ZSocket(context, ZSocketType.REQ))
+			{
+				// First, connect our subscriber socket
+				subscriber.Connect("tcp://127.0.0.1:5561");
+				subscriber.SubscribeAll();
 
-                    //  - send a synchronization request
-                    syncClient.Send("", Encoding.Unicode);
-                    //  - wait for synchronization reply
-                    syncClient.Receive(Encoding.Unicode);
+				// 0MQ is so fast, we need to wait a while…
+				Thread.Sleep(1);
 
-                    int receivedUpdates = 0;
-                    while (!subscriber.Receive(Encoding.Unicode).Equals("END"))
-                    {
-                        receivedUpdates++;
-                    }
+				// Second, synchronize with publisher
+				syncclient.Connect("tcp://127.0.0.1:5562");
 
-                    Console.WriteLine("Received {0} updates.", receivedUpdates);
-                }
-            }
+				// - send a synchronization request
+				syncclient.Send(new ZFrame());
 
-            Console.ReadKey();
-        }
-    }
+				// - wait for synchronization reply
+				syncclient.ReceiveFrame();
+
+				// Third, get our updates and report how many we got
+				int i = 0;
+				while (true)
+				{
+					using (ZFrame frame = subscriber.ReceiveFrame())
+					{
+						string text = frame.ReadString();
+						if (text == "END")
+						{
+							break;
+						}
+
+						frame.Position = 0;
+						Console.WriteLine("Receiving {0}...", frame.ReadInt32());
+
+						++i;
+					}
+				}
+				Console.WriteLine("Received {0} updates.", i);
+			}
+		}
+	}
 }

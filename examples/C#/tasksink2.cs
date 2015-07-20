@@ -1,48 +1,58 @@
-﻿//
-//  Task worker - design 2
-//  Adds pub-sub flow to receive and respond to kill signal
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
-using System;
-using System.Text;
+﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
+using System.Text;
+using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.tasksink2
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args) 
-        {
-            using (var context = ZmqContext.Create()) 
-            {
-                using (ZmqSocket receiver = context.CreateSocket(SocketType.PULL), controller = context.CreateSocket(SocketType.PUB)) 
-                {
-                    receiver.Bind("tcp://*:5558");
-                    controller.Bind("tcp://*:5559");
-                    
-                    //  Wait for start of batch
-                    receiver.Receive(Encoding.Unicode);
+	static partial class Program
+	{
+		public static void TaskSink2(string[] args)
+		{
+			//
+			// Task sink - design 2
+			// Adds pub-sub flow to send kill signal to workers
+			//
+			// Author: metadings
+			//
 
-                    var stopwatch = new Stopwatch();
-                    stopwatch.Start();
+			// Socket to receive messages on and
+			// Socket for worker control
+			using (var context = new ZContext())
+			using (var receiver = new ZSocket(context, ZSocketType.PULL))
+			using (var controller = new ZSocket(context, ZSocketType.PUB))
+			{
+				receiver.Bind("tcp://*:5558");
+				controller.Bind("tcp://*:5559");
 
-                    const int tasksToConfirm = 100;
-                    for (int taskNumber = 0; taskNumber < tasksToConfirm; taskNumber++)
-                    {
-                        string message = receiver.Receive(Encoding.Unicode);
-                        Console.WriteLine(taskNumber % 10 == 0 ? ":" : ".");
-                    }
+				// Wait for start of batch
+				receiver.ReceiveFrame();
 
-                    stopwatch.Stop();
-                    Console.WriteLine("Total elapsed time: {0}", stopwatch.ElapsedMilliseconds);
+				// Start our clock now
+				var stopwatch = new Stopwatch();
+				stopwatch.Start();
 
-                    controller.Send("KILL", Encoding.Unicode);
-                }
-            }
-        }
-    }
+				// Process 100 confirmations
+				for (int i = 0; i < 100; ++i)
+				{
+					receiver.ReceiveFrame();
+
+					if ((i / 10) * 10 == i)
+						Console.Write(":");
+					else
+						Console.Write(".");
+				}
+
+				stopwatch.Stop();
+				Console.WriteLine("Total elapsed time: {0} ms", stopwatch.ElapsedMilliseconds);
+
+				// Send kill signal to workers
+				controller.Send(new ZFrame("KILL"));
+			}
+		}
+	}
 }

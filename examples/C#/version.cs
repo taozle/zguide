@@ -1,21 +1,29 @@
-﻿//
-//  Report 0MQ version
-//
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading;
 
-//  Author:     Michael Compton
-//  Email:      michael.compton@littleedge.co.uk
-
-using System;
 using ZeroMQ;
-using zguide;
+using ZeroMQ.lib;
 
-namespace zguide.version
+namespace Examples
 {
-    internal class Program 
-    {
-        public static void Main(string[] args) 
-        {
-            Console.WriteLine(ZHelpers.Version());
-        }
-    }
+	static partial class Program
+	{
+		public static void Version(string[] args)
+		{
+			//
+			// Report 0MQ version
+			//
+			// Author: metadings
+			//
+
+			// Console.WriteLine(zmq.Version);
+
+			int major, minor, patch;
+			zmq.version(out major, out minor, out patch);
+			Console.WriteLine("{0}.{1}.{2}", major, minor, patch);
+		}
+	}
 }

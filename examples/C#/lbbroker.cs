@@ -1,159 +1,235 @@
-﻿//
-//  Least-recently used (LRU) queue device
-//  Clients and workers are shown here in-process
-//
-//  While this example runs in a single process, that is just to make
-//  it easier to start and stop the example. Each thread has its own
-//  context and conceptually acts as a separate process.
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
 using System.Text;
-using ZeroMQ;
 using System.Threading;
-using zguide;
 
-namespace zguide.lbbroker
+using ZeroMQ;
+
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            const int workersToStart = 3;
-            int clientsRunning = 10;
+	static partial class Program
+	{
+		//
+		// Load-balancing broker in C#
+		//
+		// Clients and workers are shown here in-process.
+		// While this example runs in a single process, that is just to make
+		// it easier to start and stop the example. Each thread may have its own
+		// context and conceptually acts as a separate process.
+		//
+		// Author: metadings
+		//
 
-            var workers = new List<Thread>();
-            var clients = new List<Thread>();
+		static int LBBroker_Clients = 10;
+		static int LBBroker_Workers = 3;
 
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket frontend = context.CreateSocket(SocketType.ROUTER), backend = context.CreateSocket(SocketType.ROUTER))
-                {
-                    frontend.Bind("tcp://*:5555");
-                    backend.Bind("tcp://*:5556");
+		// Basic request-reply client using REQ socket
+		static void LBBroker_Client(ZContext context, int i)
+		{
+			// Create a socket
+			using (var client = new ZSocket(context, ZSocketType.REQ))
+			{
+				// Set a printable identity
+				client.IdentityString = "CLIENT" + i;
 
-                    for (int clientNumber = 0; clientNumber < clientsRunning; clientNumber++)
-                    {
-                        clients.Add(new Thread(ClientTask));
-                        clients[clientNumber].Start();
-                    }
+				// Connect
+				client.Connect("inproc://frontend");
 
-                    for (int workerNumber = 0; workerNumber < workersToStart; workerNumber++)
-                    {
-                        workers.Add(new Thread(WorkerTask));
-                        workers[workerNumber].Start();
-                    }
+				using (var request = new ZMessage())
+				{
+					request.Add(new ZFrame("Hello"));
 
-                    //  Logic of LRU loop
-                    //  - Poll backend always, frontend only if 1+ worker ready
-                    //  - If worker replies, queue worker as ready and forward reply
-                    //    to client if necessary
-                    //  - If client requests, pop next worker and send request to it
-                    var workerQueue = new Queue<string>();
+					// Send request
+					client.Send(request);
+				}
 
-                    //  Handle worker activity on backend
-                    backend.ReceiveReady += (sender, e) =>
-                    {
-                        //  Queue worker address for LRU routing
-                        string workerAddress = e.Socket.Receive(Encoding.Unicode);
-                        workerQueue.Enqueue(workerAddress);
+				// Receive reply
+				using (ZMessage reply = client.ReceiveMessage())
+				{
+					Console.WriteLine("CLIENT{0}: {1}", i, reply[0].ReadString());
+				}
+			}
+		}
 
-                        //  Second frame is empty
-                        string empty = e.Socket.Receive(Encoding.Unicode);
+		static void LBBroker_Worker(ZContext context, int i)
+		{
+			// This is the worker task, using a REQ socket to do load-balancing.
 
-                        //  Third frame is READY or else a client reply address
-                        string clientAddress = e.Socket.Receive(Encoding.UTF8);
+			// Create socket
+			using (var worker = new ZSocket(context, ZSocketType.REQ))
+			{
+				// Set a printable identity
+				worker.IdentityString = "WORKER" + i;
 
-                        //  If client reply, send rest back to frontend
-                        if (!clientAddress.Equals("READY"))
-                        {
-                            empty = e.Socket.Receive(Encoding.Unicode);
-                            string reply = e.Socket.Receive(Encoding.Unicode);
-                            frontend.SendMore(clientAddress, Encoding.Unicode);
-                            //frontend.SendMore();
-                            frontend.Send(reply, Encoding.Unicode);
+				// Connect
+				worker.Connect("inproc://backend");
 
-                            clientsRunning--; //  Exit after N messages
-                        }
-                    };
+				// Tell broker we're ready for work
+				using (var ready = new ZFrame("READY"))
+				{
+					worker.Send(ready);
+				}
 
-                    frontend.ReceiveReady += (sender, e) =>
-                    {
-                        //  Now get next client request, route to LRU worker
-                        //  Client request is [address][empty][request]
-                        string clientAddr = e.Socket.Receive(Encoding.Unicode);
-                        string empty = e.Socket.Receive(Encoding.Unicode);
-                        string request = e.Socket.Receive(Encoding.Unicode);
+				ZError error;
+				ZMessage request;
 
-                        backend.SendMore(workerQueue.Dequeue(), Encoding.Unicode);
-                        backend.SendMore(string.Empty, Encoding.Unicode);
-                        backend.SendMore(clientAddr, Encoding.Unicode);
-                        backend.SendMore(string.Empty, Encoding.Unicode);
-                        backend.Send(request, Encoding.Unicode);
-                    };
+				while (true)
+				{
+					// Get request
+					if (null == (request = worker.ReceiveMessage(out error)))
+					{
+						// We are using "out error",
+						// to NOT throw a ZException ETERM
+						if (error == ZError.ETERM)
+							break;
 
-                    while (clientsRunning > 0)
-                    { //  Exit after N messages
-                        var poller = new Poller(workerQueue.Count > 0
-                                           ? new List<ZmqSocket>(new ZmqSocket[] { frontend, backend })
-                                           : new List<ZmqSocket>(new ZmqSocket[] { backend }));                    
-                    
-                        poller.Poll();
-                    }
-                }
-            }
-        }
+						throw new ZException(error);
+					}
 
-        private static void ClientTask()
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket client = context.CreateSocket(SocketType.REQ))
-                {
-                    ZHelpers.SetID(client, Encoding.Unicode);
-                    client.Connect("tcp://localhost:5555");
+					using (request)
+					{
+						string worker_id = request[0].ReadString();
 
-                    //  Send request, get reply
-                    client.Send("HELLO", Encoding.Unicode);
-                    string reply = client.Receive(Encoding.Unicode);
-                    Console.WriteLine("Client: {0}", reply);
-                }
-            }
-        }
+						string requestText = request[2].ReadString();
+						Console.WriteLine("WORKER{0}: {1}", i, requestText);
 
-        private static void WorkerTask()
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket worker = context.CreateSocket(SocketType.REQ))
-                {
-                    ZHelpers.SetID(worker, Encoding.Unicode);
-                    worker.Connect("tcp://localhost:5556");
+						// Send reply
+						using (var commit = new ZMessage())
+						{
+							commit.Add(new ZFrame(worker_id));
+							commit.Add(new ZFrame());
+							commit.Add(new ZFrame("OK"));
 
-                    //  Tell broker we're ready for work
-                    worker.Send("READY", Encoding.Unicode);
+							worker.Send(commit);
+						}
+					}
+				}
+			}
+		}
 
-                    while (true)
-                    {
-                        //  Read and save all frames until we get an empty frame
-                        //  In this example there is only 1 but it could be more
-                        string address = worker.Receive(Encoding.Unicode);
-                        string empty = worker.Receive(Encoding.Unicode);
+		public static void LBBroker(string[] args)
+		{
+			// This is the main task. It starts the clients and workers, and then
+			// routes requests between the two layers. Workers signal READY when
+			// they start; after that we treat them as ready when they reply with
+			// a response back to a client. The load-balancing data structure is
+			// just a queue of next available workers.
 
-                        //  Get request, send reply
-                        string request = worker.Receive(Encoding.Unicode);
-                        Console.WriteLine("Worker: {0}", request);
+			// Prepare our context and sockets
+			using (var context = new ZContext())
+			using (var frontend = new ZSocket(context, ZSocketType.ROUTER))
+			using (var backend = new ZSocket(context, ZSocketType.ROUTER))
+			{
+				// Bind
+				frontend.Bind("inproc://frontend");
+				// Bind
+				backend.Bind("inproc://backend");
 
-                        worker.SendMore(address, Encoding.Unicode);
-                        //worker.SendMore();
-                        worker.Send("OK", Encoding.Unicode);
-                    }
-                }
-            }
-        }
-    }
+				int clients = 0;
+				for (; clients < LBBroker_Clients; ++clients)
+				{
+					int j = clients;
+					new Thread(() => LBBroker_Client(context, j)).Start();
+				}
+				for (int i = 0; i < LBBroker_Workers; ++i)
+				{
+					int j = i;
+					new Thread(() => LBBroker_Worker(context, j)).Start();
+				}
+
+				// Here is the main loop for the least-recently-used queue. It has two
+				// sockets; a frontend for clients and a backend for workers. It polls
+				// the backend in all cases, and polls the frontend only when there are
+				// one or more workers ready. This is a neat way to use 0MQ's own queues
+				// to hold messages we're not ready to process yet. When we get a client
+				// reply, we pop the next available worker and send the request to it,
+				// including the originating client identity. When a worker replies, we
+				// requeue that worker and forward the reply to the original client
+				// using the reply envelope.
+
+				// Queue of available workers
+				var worker_queue = new List<string>();
+
+				ZMessage incoming;
+				ZError error;
+				var poll = ZPollItem.CreateReceiver();
+
+				while (true)
+				{
+					if (backend.PollIn(poll, out incoming, out error, TimeSpan.FromMilliseconds(64)))
+					{
+						// Handle worker activity on backend
+
+						// incoming[0] is worker_id
+						string worker_id = incoming[0].ReadString();
+						// Queue worker identity for load-balancing
+						worker_queue.Add(worker_id);
+
+						// incoming[1] is empty
+
+						// incoming[2] is READY or else client_id
+						string client_id = incoming[2].ReadString();
+
+						if (client_id != "READY")
+						{
+							// incoming[3] is empty
+
+							// incoming[4] is reply
+							string reply = incoming[4].ReadString();
+
+							using (var outgoing = new ZMessage())
+							{
+								outgoing.Add(new ZFrame(client_id));
+								outgoing.Add(new ZFrame());
+								outgoing.Add(new ZFrame(reply));
+
+								// Send
+								frontend.Send(outgoing);
+							}
+
+							if (--clients == 0)
+							{
+								// break the while (true) when all clients said Hello
+								break;
+							}
+						}
+					}
+					if (worker_queue.Count > 0)
+					{
+						// Poll frontend only if we have available workers
+
+						if (frontend.PollIn(poll, out incoming, out error, TimeSpan.FromMilliseconds(64)))
+						{
+							// Here is how we handle a client request
+
+							// incoming[0] is client_id
+							string client_id = incoming[0].ReadString();
+
+							// incoming[1] is empty
+
+							// incoming[2] is request
+							string requestText = incoming[2].ReadString();
+
+							using (var outgoing = new ZMessage())
+							{
+								outgoing.Add(new ZFrame(worker_queue[0]));
+								outgoing.Add(new ZFrame());
+								outgoing.Add(new ZFrame(client_id));
+								outgoing.Add(new ZFrame());
+								outgoing.Add(new ZFrame(requestText));
+
+								// Send
+								backend.Send(outgoing);
+							}
+
+							// Dequeue the next worker identity
+							worker_queue.RemoveAt(0);
+						}
+					}
+				}
+			}
+		}
+	}
 }

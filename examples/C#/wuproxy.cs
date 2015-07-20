@@ -1,43 +1,78 @@
-﻿//
-//  Weather proxy device
-//
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
+using System.Threading;
 
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
-using System.Text;
 using ZeroMQ;
 
-namespace zguide.wuproxy
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket frontend = context.CreateSocket(SocketType.SUB), backend = context.CreateSocket(SocketType.PUB))
-                {
-                    //  This is where the weather server sits
-                    frontend.Connect("tcp://127.0.0.1:5556");
-                    frontend.Subscribe(new byte[0]);
+	static partial class Program
+	{
+		public static void WUProxy(string[] args)
+		{
+			//
+			// Weather proxy device
+			//
+			// Author: metadings
+			//
 
-                    //  This is our public endpoint for subscribers
-                    backend.Bind("tcp://*:8100"); // i use local to be able to run the example, this could be the public ip instead eg. tcp://10.1.1.0:8100
+			using (var context = new ZContext())
+			using (var frontend = new ZSocket(context, ZSocketType.XSUB))
+			using (var backend = new ZSocket(context, ZSocketType.XPUB))
+			{
+				// Frontend is where the weather server sits
+				string localhost = "tcp://127.0.0.1:5556";
+				Console.WriteLine("I: Connecting to {0}", localhost);
+				frontend.Connect(localhost);
 
-                    //  Shunt messages out to our own subscribers
-                    while (true)
-                    {
-                        bool hasMore = true;
-                        while (hasMore)
-                        {
-                            string message = frontend.Receive(Encoding.Unicode);
-                            hasMore = frontend.ReceiveMore;
-                            backend.Send(Encoding.Unicode.GetBytes(message), message.Length, hasMore ? SocketFlags.SendMore : SocketFlags.None);
-                        }
-                    }
-                }
-            }
-        }
-    }
+				// Backend is our public endpoint for subscribers
+				foreach (IPAddress address in WUProxy_GetPublicIPs())
+				{
+					var tcpAddress = string.Format("tcp://{0}:8100", address);
+					Console.WriteLine("I: Binding on {0}", tcpAddress);
+					backend.Bind(tcpAddress);
+
+					var epgmAddress = string.Format("epgm://{0};239.192.1.1:8100", address);
+					Console.WriteLine("I: Binding on {0}", epgmAddress);
+					backend.Bind(epgmAddress);
+				}
+				using (var subscription = ZFrame.Create(1))
+				{
+					subscription.Write(new byte[] { 0x1 }, 0, 1);
+					backend.Send(subscription);
+				}
+
+				// Run the proxy until the user interrupts us
+				ZContext.Proxy(frontend, backend);
+			}
+		}
+
+		static IEnumerable<IPAddress> WUProxy_GetPublicIPs() 
+		{
+			var list = new List<IPAddress>();
+			NetworkInterface[] ifaces = NetworkInterface.GetAllNetworkInterfaces();
+			foreach (NetworkInterface iface in ifaces)
+			{
+				if (iface.NetworkInterfaceType == NetworkInterfaceType.Loopback)
+					continue;
+				if (iface.OperationalStatus != OperationalStatus.Up)
+					continue;
+
+				var props = iface.GetIPProperties();
+				var addresses = props.UnicastAddresses;
+				foreach (UnicastIPAddressInformation address in addresses)
+				{
+					if (address.Address.AddressFamily == AddressFamily.InterNetwork)
+						list.Add(address.Address);
+					// if (address.Address.AddressFamily == AddressFamily.InterNetworkV6)
+					//	list.Add(address.Address);
+				}
+			}
+			return list;
+		}
+	}
 }

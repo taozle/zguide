@@ -12,30 +12,37 @@
 
 #include <zmq.h>
 
+#include <assert.h>
+#include <signal.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdarg.h>
 #include <string.h>
-#include <sys/time.h>
 #include <time.h>
-#include <unistd.h>
-#include <assert.h>
-#include <signal.h>
-#include <uuid/uuid.h>
+
+#if (!defined (WIN32))
+#   include <sys/time.h>
+#endif
+
+#if (defined (WIN32))
+#   include <windows.h>
+#endif
 
 //  Version checking, and patch up missing constants to match 2.1
 #if ZMQ_VERSION_MAJOR == 2
 #   error "Please upgrade to ZeroMQ/3.2 for these examples"
 #endif
 
-//  Provide random number from 0..(num-1)
-#if (defined (__WINDOWS__))
-#   define randof(num)  (int) ((float) (num) * rand () / (RAND_MAX + 1.0))
-#else
-#   define randof(num)  (int) ((float) (num) * random () / (RAND_MAX + 1.0))
+//  On some version of Windows, POSIX subsystem is not installed by default.
+//  So define srandom and random ourself.
+#if (defined (WIN32))
+#   define srandom srand
+#   define random rand
 #endif
 
+//  Provide random number from 0..(num-1)
+#define randof(num)  (int) ((float) (num) * random () / (RAND_MAX + 1.0))
 
 //  Receive 0MQ string from socket and convert into C string
 //  Caller must free returned string. Returns NULL if the context
@@ -71,43 +78,51 @@ s_sendmore (void *socket, char *string) {
 static void
 s_dump (void *socket)
 {
+    int rc;
+
+    zmq_msg_t message;
+    rc = zmq_msg_init (&message);
+    assert (rc == 0);
+
     puts ("----------------------------------------");
-    while (1) {
-        //  Process all parts of the message
-        zmq_msg_t message;
-        zmq_msg_init (&message);
+    //  Process all parts of the message
+    do {
         int size = zmq_msg_recv (&message, socket, 0);
+        assert (size >= 0);
 
         //  Dump the message as text or binary
-        char *data = zmq_msg_data (&message);
+        char *data = (char*)zmq_msg_data (&message);
+        assert (data != 0);
         int is_text = 1;
         int char_nbr;
-        for (char_nbr = 0; char_nbr < size; char_nbr++)
+        for (char_nbr = 0; char_nbr < size; char_nbr++) {
             if ((unsigned char) data [char_nbr] < 32
-            ||  (unsigned char) data [char_nbr] > 127)
+                || (unsigned char) data [char_nbr] > 126) {
                 is_text = 0;
+            }
+        }
 
         printf ("[%03d] ", size);
         for (char_nbr = 0; char_nbr < size; char_nbr++) {
-            if (is_text)
+            if (is_text) {
                 printf ("%c", data [char_nbr]);
-            else
+            } else {
                 printf ("%02X", (unsigned char) data [char_nbr]);
+            }
         }
         printf ("\n");
+    } while (zmq_msg_more (&message));
 
-        int64_t more;           //  Multipart detection
-        more = 0;
-        size_t more_size = sizeof (more);
-        zmq_getsockopt (socket, ZMQ_RCVMORE, &more, &more_size);
-        zmq_msg_close (&message);
-        if (!more)
-            break;      //  Last message part
-    }
+    rc = zmq_msg_close (&message);
+    assert (rc == 0);
 }
 
+#if (!defined (WIN32))
 //  Set simple random printable identity on socket
-//
+//  Caution:
+//    DO NOT call this version of s_set_id from multiple threads on MS Windows
+//    since s_set_id will call rand() on MS Windows. rand(), however, is not 
+//    reentrant or thread-safe. See issue #521.
 static void
 s_set_id (void *socket)
 {
@@ -115,13 +130,22 @@ s_set_id (void *socket)
     sprintf (identity, "%04X-%04X", randof (0x10000), randof (0x10000));
     zmq_setsockopt (socket, ZMQ_IDENTITY, identity, strlen (identity));
 }
-
+#else
+//  Fix #521 for MS Windows.
+static void
+s_set_id(void *socket, intptr_t id)
+{
+    char identity [10];
+    sprintf(identity, "%04X", (int)id);
+    zmq_setsockopt(socket, ZMQ_IDENTITY, identity, strlen(identity));
+}
+#endif
 
 //  Sleep for a number of milliseconds
 static void
 s_sleep (int msecs)
 {
-#if (defined (__WINDOWS__))
+#if (defined (WIN32))
     Sleep (msecs);
 #else
     struct timespec t;
@@ -135,7 +159,7 @@ s_sleep (int msecs)
 static int64_t
 s_clock (void)
 {
-#if (defined (__WINDOWS__))
+#if (defined (WIN32))
     SYSTEMTIME st;
     GetSystemTime (&st);
     return (int64_t) st.wSecond * 1000 + st.wMilliseconds;
@@ -154,7 +178,7 @@ s_console (const char *format, ...)
 {
     time_t curtime = time (NULL);
     struct tm *loctime = localtime (&curtime);
-    char *formatted = malloc (20);
+    char *formatted = (char*)malloc (20);
     strftime (formatted, 20, "%y-%m-%d %H:%M:%S ", loctime);
     printf ("%s", formatted);
     free (formatted);

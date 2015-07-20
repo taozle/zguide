@@ -1,148 +1,183 @@
-﻿//
-//  Asynchronous client-to-server (DEALER to ROUTER)
-//
-//  While this example runs in a single process, that is just to make
-//  it easier to start and stop the example. Each task has its own
-//  context and conceptually acts as a separate process.
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading;
+
 using ZeroMQ;
-using zguide;
 
-namespace zguide.asycnsrv
+namespace Examples
 {
-    internal class Program
-    {
-        //  This main thread simply starts several clients, and a server, and then
-        //  waits for the server to finish.
-        public static void Main(string[] args)
-        {
-            var clients = new List<Thread>(3);
-            for (int clientNumber = 0; clientNumber < 3; clientNumber++)
-            {
-                clients.Add(new Thread(ClientTask));
-                clients[clientNumber].Start();
-            }
+	static partial class Program
+	{
+		static void AsyncSrv_Client(ZContext context, int i) 
+		{
+			//
+			// Asynchronous client-to-server (DEALER to ROUTER)
+			//
+			// While this example runs in a single process, that is to make
+			// it easier to start and stop the example. Each task has its own
+			// context and conceptually acts as a separate process.
+			//
+			// Author: metadings
+			//
 
-            var serverThread = new Thread(ServerTask);
-            serverThread.Start();
+			// This is our client task
+			// It connects to the server, and then sends a request once per second
+			// It collects responses as they arrive, and it prints them out. We will
+			// run several client tasks in parallel, each with a different random ID.
 
-            Console.ReadLine();
-        }
+			using (var client = new ZSocket(context, ZSocketType.DEALER))
+			{
+				// Set identity to make tracing easier
+				client.Identity = Encoding.UTF8.GetBytes("CLIENT" + i);
+				// Connect
+				client.Connect("tcp://127.0.0.1:5570");
 
-        //  ---------------------------------------------------------------------
-        //  This is our client task
-        //  It connects to the server, and then sends a request once per second
-        //  It collects responses as they arrive, and it prints them out. We will
-        //  run several client tasks in parallel, each with a different random ID.
-        public static void ClientTask()
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket client = context.CreateSocket(SocketType.DEALER))
-                {
-                    //  Generate printable identity for the client
-                    string identity = ZHelpers.SetID(client, Encoding.Unicode);
-                    client.Connect("tcp://localhost:5570");
+				ZError error;
+				ZMessage incoming;
+				var poll = ZPollItem.CreateReceiver();
 
-                    client.ReceiveReady += (s, e) =>
-                    {
-                        var zmsg = new ZMessage(e.Socket);
-                        Console.WriteLine("{0} : {1}", identity, zmsg.BodyToString());
-                    };
+				int requests = 0;
+				while (true)
+				{
+					// Tick once per second, pulling in arriving messages
+					for (int centitick = 0; centitick < 100; ++centitick)
+					{
+						if (!client.PollIn(poll, out incoming, out error, TimeSpan.FromMilliseconds(10)))
+						{
+							if (error == ZError.EAGAIN)
+							{
+								Thread.Sleep(1);
+								continue;
+							}
+							if (error == ZError.ETERM)
+								return;	// Interrupted
+							throw new ZException(error);
+						}
+						using (incoming)
+						{
+							string messageText = incoming[0].ReadString();
+							Console.WriteLine("[CLIENT{0}] {1}", i, messageText);
+						}
+					}
+					using (var outgoing = new ZMessage())
+					{
+						outgoing.Add(new ZFrame(client.Identity));
+						outgoing.Add(new ZFrame("request " + (++requests)));
 
-                    int requestNumber = 0;
+						if (!client.Send(outgoing, out error))
+						{
+							if (error == ZError.ETERM)
+								return;	// Interrupted
+							throw new ZException(error);
+						}
+					}
+				}
+			}
+		}
 
-                    var poller = new Poller(new List<ZmqSocket> { client });
+		static void AsyncSrv_ServerTask(ZContext context) 
+		{
+			// This is our server task.
+			// It uses the multithreaded server model to deal requests out to a pool
+			// of workers and route replies back to clients. One worker can handle
+			// one request at a time but one client can talk to multiple workers at
+			// once.
 
-                    while (true)
-                    {
-                        //  Tick once per second, pulling in arriving messages
-                        for (int centitick = 0; centitick < 100; centitick++)
-                        {
-                            poller.Poll(TimeSpan.FromMilliseconds(10));
-                        }
-                        var zmsg = new ZMessage("");
-                        zmsg.StringToBody(String.Format("request: {0}", ++requestNumber));
-                        zmsg.Send(client);
-                    }
-                }
-            }
-        }
+			using (var frontend = new ZSocket(context, ZSocketType.ROUTER))
+			using (var backend = new ZSocket(context, ZSocketType.DEALER))
+			{
+				// Frontend socket talks to clients over TCP
+				frontend.Bind("tcp://*:5570");
+				// Backend socket talks to workers over inproc
+				backend.Bind("inproc://backend");
 
-        //  ---------------------------------------------------------------------
-        //  This is our server task
-        //  It uses the multithreaded server model to deal requests out to a pool
-        //  of workers and route replies back to clients. One worker can handle
-        //  one request at a time but one client can talk to multiple workers at
-        //  once.
-        private static void ServerTask()
-        {
-            var workers = new List<Thread>(5);
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket frontend = context.CreateSocket(SocketType.ROUTER), backend = context.CreateSocket(SocketType.DEALER))
-                {
-                    frontend.Bind("tcp://*:5570");
-                    backend.Bind("inproc://backend");
+				// Launch pool of worker threads, precise number is not critical
+				for (int i = 0; i < 5; ++i)
+				{
+					int j = i; new Thread(() => AsyncSrv_ServerWorker(context, j)).Start();
+				}
 
-                    for (int workerNumber = 0; workerNumber < 5; workerNumber++)
-                    {
-                        workers.Add(new Thread(ServerWorker));
-                        workers[workerNumber].Start(context);
-                    }
+				// Connect backend to frontend via a proxy
+				ZError error;
+				if (!ZContext.Proxy(frontend, backend, out error))
+				{
+					if (error == ZError.ETERM)
+						return;	// Interrupted
+					throw new ZException(error);
+				}
+			}
+		}
 
-                    //  Switch messages between frontend and backend
-                    frontend.ReceiveReady += (s, e) =>
-                    {
-                        var zmsg = new ZMessage(e.Socket);
-                        zmsg.Send(backend);
-                    };
+		static void AsyncSrv_ServerWorker(ZContext context, int i) 
+		{
+			// Each worker task works on one request at a time and sends a random number
+			// of replies back, with random delays between replies:
 
-                    backend.ReceiveReady += (s, e) =>
-                    {
-                        var zmsg = new ZMessage(e.Socket);
-                        zmsg.Send(frontend);
-                    };
+			using (var worker = new ZSocket(context, ZSocketType.DEALER))
+			{
+				worker.Connect("inproc://backend");
 
-                    var poller = new Poller(new List<ZmqSocket> {frontend, backend});
+				ZError error;
+				ZMessage request;
+				var rnd = new Random();
 
-                    while (true)
-                    {
-                        poller.Poll();
-                    }
-                }
-            }
-        }
+				while (true)
+				{
+					if (null == (request = worker.ReceiveMessage(out error)))
+					{
+						if (error == ZError.ETERM)
+							return;	// Interrupted
+						throw new ZException(error);
+					}
+					using (request)
+					{
+						// The DEALER socket gives us the reply envelope and message
+						string identity = request[1].ReadString();
+						string content = request[2].ReadString();
 
-        //  Accept a request and reply with the same text a random number of
-        //  times, with random delays between replies.
-        private static void ServerWorker(object context)
-        {
-            var randomizer = new Random(DateTime.Now.Millisecond);
-            using (ZmqSocket worker = ((ZmqContext)context).CreateSocket(SocketType.DEALER))
-            {
-                worker.Connect("inproc://backend");
+						// Send 0..4 replies back
+						int replies = rnd.Next(5);
+						for (int reply = 0; reply < replies; ++reply)
+						{
+							// Sleep for some fraction of a second
+							Thread.Sleep(rnd.Next(1000) + 1);
 
-                while (true)
-                {
-                    //  The DEALER socket gives us the address envelope and message
-                    var zmsg = new ZMessage(worker);
-                    //  Send 0..4 replies back
-                    int replies = randomizer.Next(5);
-                    for (int reply = 0; reply < replies; reply++)
-                    {
-                        Thread.Sleep(randomizer.Next(1, 1000));
-                        zmsg.Send(worker);
-                    }
-                }
-            }
-        }
-    }
+							using (var response = new ZMessage())
+							{
+								response.Add(new ZFrame(identity));
+								response.Add(new ZFrame(content));
+
+								if (!worker.Send(response, out error))
+								{
+									if (error == ZError.ETERM)
+										return;	// Interrupted
+									throw new ZException(error);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		public static void AsyncSrv(string[] args)
+		{
+			// The main thread simply starts several clients and a server, and then
+			// waits for the server to finish.
+
+			using (var context = new ZContext())
+			{
+				for (int i = 0; i < 5; ++i)
+				{
+					int j = i; new Thread(() => AsyncSrv_Client(context, j)).Start();
+				}
+				new Thread(() => AsyncSrv_ServerTask(context)).Start();
+
+				// Run for 5 seconds then quit
+				Thread.Sleep(5 * 1000);
+			}
+		}
+	}
 }

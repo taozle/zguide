@@ -1,109 +1,104 @@
-﻿//
-//  Custom routing Router to Mama (ROUTER to REQ)
-//
-//  While this example runs in a single process, that is just to make
-//  it easier to start and stop the example. Each thread has its own
-//  context and conceptually acts as a separate process.
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
 using System.Text;
-using ZeroMQ;
 using System.Threading;
-using zguide;
 
-namespace zguide.rtreq
+using ZeroMQ;
+
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            const int workersCount = 10;
-            var workers = new List<Thread>(workersCount);
-            
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket client = context.CreateSocket(SocketType.ROUTER))
-                {
-                    client.Bind("tcp://*:5555");
+	static partial class Program
+	{
+		static int RTReq_Workers = 10;
 
-                    for (int workerNumber = 0; workerNumber < workersCount; workerNumber++)
-                    {
-                        workers.Add(new Thread(WorkerTask));
-                        workers[workerNumber].Start();
-                    }
+		public static void RTReq(string[] args)
+		{
+			//
+			// ROUTER-to-REQ example
+			//
+			// While this example runs in a single process, that is only to make
+			// it easier to start and stop the example. Each thread has its own
+			// context and conceptually acts as a separate process.
+			//
+			// Author: metadings
+			//
 
-                    for (int taskNumber = 0; taskNumber < workersCount * 10; taskNumber++)
-                    {
-                        //  LRU worker is next waiting in queue
-                        string address = client.Receive(Encoding.Unicode);
-                        string empty = client.Receive(Encoding.Unicode);
-                        string ready = client.Receive(Encoding.Unicode);
+			using (var context = new ZContext())
+			using (var broker = new ZSocket(context, ZSocketType.ROUTER))
+			{
+				broker.Bind("tcp://*:5671");
 
-                        client.SendMore(address, Encoding.Unicode);
-                        client.SendMore(string.Empty, Encoding.Unicode);
-                        client.Send("This is the workload", Encoding.Unicode);
-                    }
+				for (int i = 0; i < RTReq_Workers; ++i)
+				{
+					int j = i; new Thread(() => RTReq_Worker(j)).Start();
+				}
 
-                    //  Now ask mamas to shut down and report their results
-                    for (int taskNbr = 0; taskNbr < workersCount; taskNbr++)
-                    {
-                        string address = client.Receive(Encoding.Unicode);
-                        string empty = client.Receive(Encoding.Unicode);
-                        string ready = client.Receive(Encoding.Unicode);
+				var stopwatch = new Stopwatch();
+				stopwatch.Start();
 
-                        client.SendMore(address, Encoding.Unicode);
-                        client.SendMore(string.Empty, Encoding.Unicode);
-                        client.Send("END", Encoding.Unicode);
-                    }
-                }
-            }
+				// Run for five seconds and then tell workers to end
+				int workers_fired = 0;
+				while (true)
+				{
+					// Next message gives us least recently used worker
+					using (ZMessage identity = broker.ReceiveMessage())
+					{
+						broker.SendMore(identity[0]);
+						broker.SendMore(new ZFrame());
 
-            Console.ReadLine();
-        }
+						// Encourage workers until it's time to fire them
+						if (stopwatch.Elapsed < TimeSpan.FromSeconds(5))
+						{
+							broker.Send(new ZFrame("Work harder!"));
+						}
+						else
+						{
+							broker.Send(new ZFrame("Fired!"));
 
-        public static void WorkerTask()
-        {
-            var randomizer = new Random(DateTime.Now.Millisecond);
+							if (++workers_fired == RTReq_Workers)
+							{
+								break;
+							}
+						}
+					}
+				}
+			}
+		}
 
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket worker = context.CreateSocket(SocketType.REQ))
-                {
-                    //  We use a string identity for ease here
-                    ZHelpers.SetID(worker, Encoding.Unicode);
-                    worker.Connect("tcp://localhost:5555");
+		static void RTReq_Worker(int i) 
+		{
+			using (var context = new ZContext())
+			using (var worker = new ZSocket(context, ZSocketType.REQ))
+			{
+				worker.IdentityString = "PEER" + i;	// Set a printable identity
+				worker.Connect("tcp://127.0.0.1:5671");
 
-                    int total = 0;
+				int total = 0;
+				while (true)
+				{
+					// Tell the broker we're ready for work
+					worker.Send(new ZFrame("Hi Boss"));
 
-                    bool end = false;
-                    while (!end)
-                    {
-                        //  Tell the router we're ready for work
-                        worker.Send("Ready", Encoding.Unicode);
+					// Get workload from broker, until finished
+					using (ZFrame frame = worker.ReceiveFrame())
+					{
+						bool finished = (frame.ReadString() == "Fired!");
+						if (finished)
+						{
+							break;
+						}
+					}
 
-                        //  Get workload from router, until finished
-                        string workload = worker.Receive(Encoding.Unicode);
+					total++;
 
-                        if (workload.Equals("END"))
-                        {
-                            end = true;
-                        }
-                        else
-                        {
-                            total++;
+					// Do some random work
+					Thread.Sleep(1);
+				}
 
-                            Thread.Sleep(randomizer.Next(1, 1000)); //  Simulate 'work'
-                        }
-                    }
-
-                    Console.WriteLine("ID ({0}) processed: {1} tasks", worker.Identity, total);
-                }
-            }
-        }
-    }
+				Console.WriteLine("Completed: PEER{0}, {1} tasks", i, total);
+			}
+		}
+	}
 }

@@ -1,52 +1,66 @@
-﻿//
-//  Multithreaded Hello World server
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading;
+
 using ZeroMQ;
-using ZeroMQ.Devices;
 
-namespace zguide.mtserver
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
+	static partial class Program
+	{
+		public static void MTServer(string[] args)
+		{
+			//
+			// Multithreaded Hello World server
+			//
+			// Author: metadings
+			//
 
-                using (var queue = new ZeroMQ.Devices.QueueDevice(context, "tcp://*:5555", "inproc://workers", DeviceMode.Blocking))
-                {
-                    queue.Initialize();
-                    var workerThreads = new Thread[5];
-                    for (int threadId = 0; threadId < workerThreads.Length; threadId++)
-                    {
-                        workerThreads[threadId] = new Thread(WorkerRoutine);
-                        workerThreads[threadId].Start(context);
-                    }
-                    queue.Start();
-                }
+			// Socket to talk to clients and
+			// Socket to talk to workers
+			using (var ctx = new ZContext())
+			using (var clients = new ZSocket(ctx, ZSocketType.ROUTER))
+			using (var workers = new ZSocket(ctx, ZSocketType.DEALER))
+			{
+				clients.Bind("tcp://*:5555");
+				workers.Bind("inproc://workers");
 
-            }
-        }
+				// Launch pool of worker threads
+				for (int i = 0; i < 5; ++i)
+				{
+					new Thread(() => MTServer_Worker(ctx)).Start();
+				}
 
-        private static void WorkerRoutine(object context)
-        {
-            ZmqSocket receiver = ((ZmqContext)context).CreateSocket(SocketType.REP);
-            receiver.Connect("inproc://workers");
+				// Connect work threads to client threads via a queue proxy
+				ZContext.Proxy(clients, workers);
+			}
+		}
+		
+		static void MTServer_Worker(ZContext ctx) 
+		{
+			// Socket to talk to dispatcher
+			using (var server = new ZSocket(ctx, ZSocketType.REP))
+			{
+				server.Connect("inproc://workers");
 
-            while (true)
-            {
-                string message = receiver.Receive(Encoding.Unicode);
+				while (true)
+				{
+					using (ZFrame frame = server.ReceiveFrame())
+					{
+						Console.Write("Received: {0}", frame.ReadString());
 
-                Thread.Sleep(1000); //  Simulate 'work'
-                
-                receiver.Send("World", Encoding.Unicode);
-            }
-        }
-    }
+						// Do some 'work'
+						Thread.Sleep(1);
+
+						// Send reply back to client
+						string replyText = "World";
+						Console.WriteLine(", Sending: {0}", replyText);
+						server.Send(new ZFrame(replyText));
+					}
+				}
+			}
+		}
+	}
 }

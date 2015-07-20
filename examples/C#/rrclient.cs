@@ -1,37 +1,41 @@
-﻿//
-//  Request-reply client
-//  Connects REQ socket to tcp://localhost:5559
-//  Sends "Hello" to server, expects "World" back
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
-
-using System;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
+using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.rrclient
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket socket = context.CreateSocket(SocketType.REQ))
-                {
-                    socket.Connect("tcp://localhost:5559");
+	static partial class Program
+	{
+		public static void RRClient(string[] args)
+		{
+			//
+			// Hello World client
+			// Connects REQ socket to tcp://localhost:5559
+			// Sends "Hello" to server, expects "World" back
+			//
+			// Author: metadings
+			//
 
-                    const int requestsToSend = 10;
-                    for (int requestNumber = 0; requestNumber < requestsToSend; requestNumber++)
-                    {
-                        socket.Send("Hello", Encoding.Unicode);
-                        string message = socket.Receive(Encoding.Unicode);
-                        Console.WriteLine("Received reply: " + message);
-                    }
-                }
-            }
-        }
-    }
+			// Socket to talk to server
+			using (var context = new ZContext())
+			using (var requester = new ZSocket(context, ZSocketType.REQ))
+			{
+				requester.Connect("tcp://127.0.0.1:5559");
+
+				for (int n = 0; n < 10; ++n)
+				{
+					requester.Send(new ZFrame("Hello"));
+
+					using (ZFrame reply = requester.ReceiveFrame())
+					{
+						Console.WriteLine("Hello {0}!", reply.ReadString());
+					}
+				}
+			}
+		}
+	}
 }

@@ -4,11 +4,18 @@ import System.ZMQ4.Monadic
 
 import Numeric (showHex)
 
+import Control.Applicative ((<$>))
+import System.Random
+import System.Locale
+import Data.Time
 import Data.ByteString.Char8 (pack, unpack)
 import Data.Char (ord)
 import Text.Printf (printf)
-import System.Random
 import qualified Data.ByteString as B
+
+
+type Frame = B.ByteString
+type Message = [Frame]
 
 
 dumpMsg :: [B.ByteString] -> IO ()
@@ -46,3 +53,42 @@ genUniqueId = do
 
 prettyPrint :: B.ByteString -> String
 prettyPrint = concatMap (`showHex` "") . B.unpack
+
+-- Returns the current UNIX time in milliseconds
+currentTime_ms :: IO Integer
+currentTime_ms = do
+    time_secs <- (read <$> formatTime defaultTimeLocale "%s" <$> getCurrentTime) :: IO Integer
+    return $ time_secs * 1000
+
+nextHeartbeatTime_ms :: Integer -> IO Integer
+nextHeartbeatTime_ms heartbeatInterval_ms = do
+    currTime <- currentTime_ms
+    return $ currTime + heartbeatInterval_ms
+
+
+-- Message frames util functions
+--
+
+-- Push frame plus empty frame before first frame.
+z_wrap :: Message -> Frame -> Message
+z_wrap msg frame = frame : B.empty : msg
+
+-- Pop frame and empty frame if follows
+z_unwrap :: Message -> (Frame, Message)
+z_unwrap msg = 
+    let (frame, msg') = z_pop msg
+        (_, msg'') = z_pop msg'
+    in  (frame, msg'')
+
+-- Push frame before all frames
+z_push :: Message -> Frame -> Message
+z_push msg frame = frame : msg
+
+-- Pop first frame from message.
+-- Returns an empty frame/message pair if there's nothing in the message in order to
+-- make more convenient the construction of new messages on the fly.
+-- TODO: Think how to put a Maybe in here.
+z_pop :: Message -> (Frame, Message)
+z_pop [] = (B.empty, [B.empty])
+z_pop [frame] = (frame, [B.empty])
+z_pop (frame:rest) = (frame, rest)

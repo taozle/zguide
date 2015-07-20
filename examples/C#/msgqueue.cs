@@ -1,26 +1,36 @@
-﻿//
-//  Simple message queuing broker
-//  Same as request-reply broker but using QUEUE device
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk, ptomasroos@gmail.com
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading;
 
 using ZeroMQ;
 
-namespace zguide.msqueue
+namespace Examples
 {
-    internal class Program
-    {
-        public static void Main(string[] args)
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (var queue = new ZeroMQ.Devices.QueueDevice(context, "tcp://*:5559", "tcp://*:5560"))
-                {
-                    
-                }
-            }
-        }
-    }
+	static partial class Program
+	{
+		public static void MsgQueue(string[] args)
+		{
+			//
+			// Simple message queuing broker
+			// Same as request-reply broker but using QUEUE device
+			//
+			// Author: metadings
+			//
+
+			// Socket facing clients and
+			// Socket facing services
+			using (var context = new ZContext())
+			using (var frontend = new ZSocket(context, ZSocketType.ROUTER))
+			using (var backend = new ZSocket(context, ZSocketType.DEALER))
+			{
+				frontend.Bind("tcp://*:5559");
+				backend.Bind("tcp://*:5560");
+
+				// Start the proxy
+				ZContext.Proxy(frontend, backend);
+			}
+		}
+	}
 }

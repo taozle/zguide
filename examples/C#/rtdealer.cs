@@ -1,126 +1,107 @@
-﻿//
-//  Custom routing Router to Dealer
-//
-//  While this example runs in a single process, that is just to make
-//  it easier to start and stop the example. Each thread has its own
-//  context and conceptually acts as a separate process.
-//
-
-//  Author:     Michael Compton, Tomas Roos
-//  Email:      michael.compton@littleedge.co.uk. ptomasroos@gmail.com
-
-using System;
-using System.Threading;
+﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
 using System.Text;
+using System.Threading;
+
 using ZeroMQ;
 
-namespace zguide.rtdealer
+namespace Examples
 {
-    internal class Program
-    {
-        //  We have two workers, here we copy the code, normally these would
-        //  run on different boxes...
-        public static void Main(string[] args)
-        {
-            var randomizer = new Random(DateTime.Now.Millisecond);
-            var workers = new List<Thread>(new[] { new Thread(WorkerTaskA), new Thread(WorkerTaskB) });
-            
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket client = context.CreateSocket(SocketType.ROUTER))
-                {
-                    client.Bind("tcp://*:5555");
-                    foreach (Thread thread in workers)
-                    {
-                        thread.Start();
-                    }
+	static partial class Program
+	{
+		static int RTDealer_Workers = 10;
 
-                    //  Wait for threads to connect, since otherwise the messages we send won't be routable.
-                    Thread.Sleep(1000);
+		public static void RTDealer(string[] args)
+		{
+			//
+			// ROUTER-to-DEALER example
+			//
+			// While this example runs in a single process, that is only to make
+			// it easier to start and stop the example. Each thread has its own
+			// context and conceptually acts as a separate process.
+			//
+			// Author: metadings
+			//
 
-                    for (int taskNumber = 0; taskNumber < 10; taskNumber++)
-                    {
-                        //  Send two message parts, first the address...
-                        client.SendMore(randomizer.Next(3) > 0 ? "A" : "B", Encoding.Unicode);
+			using (var context = new ZContext())
+			using (var broker = new ZSocket(context, ZSocketType.ROUTER))
+			{
+				broker.Bind("tcp://*:5671");
 
-                        //  And then the workload
-                        client.Send("This is the workload", Encoding.Unicode);
-                    }
+				for (int i = 0; i < RTDealer_Workers; ++i)
+				{
+					int j = i; new Thread(() => RTDealer_Worker(j)).Start();
+				}
 
-                    client.SendMore("A", Encoding.Unicode);
-                    client.Send("END", Encoding.Unicode);
+				var stopwatch = new Stopwatch();
+				stopwatch.Start();
 
-                    client.SendMore("B", Encoding.Unicode);
-                    client.Send("END", Encoding.Unicode);
-                }
-            }
+				// Run for five seconds and then tell workers to end
+				int workers_fired = 0;
+				while (true)
+				{
+					// Next message gives us least recently used worker
+					using (ZMessage identity = broker.ReceiveMessage())
+					{
+						broker.SendMore(identity[0]);
+						broker.SendMore(new ZFrame());
 
-            Console.ReadKey();
-        }
+						// Encourage workers until it's time to fire them
+						if (stopwatch.Elapsed < TimeSpan.FromSeconds(5))
+						{
+							broker.Send(new ZFrame("Work harder!"));
+						}
+						else
+						{
+							broker.Send(new ZFrame("Fired!"));
 
-        private static void WorkerTaskA()
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket worker = context.CreateSocket(SocketType.DEALER))
-                {
-                    worker.Identity = Encoding.Unicode.GetBytes("A");
-                    worker.Connect("tcp://localhost:5555");
+							if (++workers_fired == RTDealer_Workers)
+							{
+								break;
+							}
+						}
+					}
+				}
+			}
+		}
 
-                    int total = 0;
+		static void RTDealer_Worker(int i) 
+		{
+			using (var context = new ZContext())
+			using (var worker = new ZSocket(context, ZSocketType.DEALER))
+			{
+				worker.IdentityString = "PEER" + i;	// Set a printable identity
+				worker.Connect("tcp://127.0.0.1:5671");
 
-                    bool end = false;
+				int total = 0;
+				while (true)
+				{
+					// Tell the broker we're ready for work
+					worker.SendMore(new ZFrame(worker.Identity));	
+					worker.SendMore(new ZFrame());
+					worker.Send(new ZFrame("Hi Boss"));	
 
-                    while (!end)
-                    {
-                        string request = worker.Receive(Encoding.Unicode);
-                        
-                        if (request.Equals("END"))
-                        {
-                            end = true;
-                        }
-                        else
-                        {
-                            total++;
-                        }
-                    }
+					// Get workload from broker, until finished
+					using (ZMessage msg = worker.ReceiveMessage())
+					{
+						bool finished = (msg[1].ReadString() == "Fired!");
 
-                    Console.WriteLine("A Received: {0}", total);
-                }
-            }
-        }
+						if (finished)
+						{
+							break;
+						}
+					}
 
-        private static void WorkerTaskB()
-        {
-            using (var context = ZmqContext.Create())
-            {
-                using (ZmqSocket worker = context.CreateSocket(SocketType.DEALER))
-                {
-                    worker.Identity = Encoding.Unicode.GetBytes("B");
-                    worker.Connect("tcp://localhost:5555");
+					total++;
 
-                    int total = 0;
+					// Do some random work
+					Thread.Sleep(1);
+				}
 
-                    bool end = false;
-
-                    while (!end)
-                    {
-                        string request = worker.Receive(Encoding.Unicode);
-
-                        if (request.Equals("END"))
-                        {
-                            end = true;
-                        }
-                        else
-                        {
-                            total++;
-                        }
-                    }
-
-                    Console.WriteLine("B Received: {0}", total);
-                }
-            }
-        }
-    }
+				Console.WriteLine("Completed: PEER{0}, {1} tasks", i, total);
+			}
+		}
+	}
 }
