@@ -27,11 +27,11 @@ namespace Examples
 				using (var anonymous = new ZSocket(context, ZSocketType.REQ))
 				{
 					anonymous.Connect("inproc://example");
-					anonymous.Send(new ZFrame("ROUTER uses REQ's generated UUID"));
+					anonymous.Send(new ZFrame("ROUTER uses REQ's generated 5 byte identity"));
 				}
 				using (ZMessage msg = sink.ReceiveMessage())
-				{
-					Console_WriteZMessage("---", msg);
+				{    
+					msg.DumpZmsg("--------------------------");
 				}
 
 				// Then set the identity ourselves
@@ -43,7 +43,7 @@ namespace Examples
 				}
 				using (ZMessage msg = sink.ReceiveMessage())
 				{
-					Console_WriteZMessage("---", msg);
+					msg.DumpZmsg("--------------------------");
 				}
 			}
 		}
